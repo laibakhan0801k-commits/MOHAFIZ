@@ -1,0 +1,26 @@
+# Secrets / env
+.env
+.env.*
+Backend/.env
+
+# Python
+Backend/venv/
+Backend/__pycache__/
+**/__pycache__/
+*.pyc
+
+# Backend cache
+Backend/cache/
+
+# Node / Next.js
+Frontend/mohafizweb/node_modules/
+Frontend/mohafizweb/.next/
+Frontend/mohafizweb/out/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# OS
+.DS_Store
+Thumbs.db
