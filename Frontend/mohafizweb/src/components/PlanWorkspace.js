@@ -5,6 +5,8 @@ import { useRouter } from 'next/navigation';
 import * as maplibregl from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
 
+const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000';
+
 const RESPONSE_TOOLS = [
   { key: 'closeRoad', label: 'Close flooded road', emoji: '🚧', color: '#dc2626', kind: 'road', hint: 'Click any red flooded road to close it to traffic' },
   { key: 'boatLaunch', label: 'Boat launch point', emoji: '🛟', color: '#0ea5e9', kind: 'point', hint: 'Click where rescue boats should be deployed from' },
@@ -42,22 +44,149 @@ export default function PlanWorkspace() {
   const [markers, setMarkers] = useState([]);
   const [customNotes, setCustomNotes] = useState([]);
   const [noteDraft, setNoteDraft] = useState('');
+  const [startPoint, setStartPoint] = useState(null);
+  const [unreachableHospitals, setUnreachableHospitals] = useState([]);
+  const [routeInfo, setRouteInfo] = useState(null);
+  const [checkingAccess, setCheckingAccess] = useState(false);
+  const [destinationPoint, setDestinationPoint] = useState(null);
 
   const activeToolRef = useRef(null);
   const planTypeRef = useRef('response');
+  const startPointRef = useRef(null);
   useEffect(() => { activeToolRef.current = activeTool; }, [activeTool]);
   useEffect(() => { planTypeRef.current = planType; }, [planType]);
+  useEffect(() => { startPointRef.current = startPoint; }, [startPoint]);
 
   const TOOLS = planType === 'response' ? RESPONSE_TOOLS : PREVENTION_TOOLS;
 
   useEffect(() => {
     const raw = sessionStorage.getItem('mohafiz_scenario');
     if (!raw) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- reads browser-only sessionStorage after mount, deliberately deferred to avoid SSR/CSR hydration mismatch
       setStatus('No scenario found. Run a simulation first.');
       return;
     }
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- reads browser-only sessionStorage after mount, deliberately deferred to avoid SSR/CSR hydration mismatch
     setScenario(JSON.parse(raw));
   }, []);
+
+  // Auto-check EVERY affected hospital as soon as a start point is set —
+  // no manual clicking required. Unreachable ones get marked with a ✕.
+  useEffect(() => {
+    if (!startPoint || !scenario) return;
+    let cancelled = false;
+
+    async function checkAll() {
+      setCheckingAccess(true);
+      setUnreachableHospitals([]);
+      setRouteInfo(null);
+      setDestinationPoint(null);
+
+      const map = mapRef.current;
+      if (map && map.getSource('route-direct')) {
+        map.getSource('route-direct').setData({ type: 'FeatureCollection', features: [] });
+      }
+      if (map && map.getSource('route-safe')) {
+        map.getSource('route-safe').setData({ type: 'FeatureCollection', features: [] });
+      }
+
+      const hospitals = scenario.affected_facilities.filter(function (f) {
+        return ['hospital', 'clinic', 'doctors'].indexOf(f.amenity) !== -1;
+      });
+
+      const results = await Promise.all(hospitals.map(async function (h) {
+        try {
+          const res = await fetch(API_URL + '/route', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              start_lat: startPoint.lat,
+              start_lon: startPoint.lon,
+              end_lat: h.lat,
+              end_lon: h.lon,
+              water_level_m: scenario.water_level_m,
+            }),
+          });
+          const data = await res.json();
+          return { name: h.name, lat: h.lat, lon: h.lon, reachable: data.reachable !== false };
+        } catch (err) {
+          return { name: h.name, lat: h.lat, lon: h.lon, reachable: true };
+        }
+      }));
+
+      if (cancelled) return;
+
+      const unreachable = results.filter(function (r) { return !r.reachable; });
+      setUnreachableHospitals(unreachable);
+      setCheckingAccess(false);
+    }
+
+    checkAll();
+    return function () { cancelled = true; };
+  }, [startPoint, scenario]);
+
+  async function runRoute(destLat, destLon, destinationName) {
+    const start = startPointRef.current;
+    if (!start) {
+      alert('Set a start point first — pick "Set start point" from the Routing panel, then click the map.');
+      return;
+    }
+
+    setRouteInfo({ loading: true, hospitalName: destinationName });
+
+    try {
+      const res = await fetch(API_URL + '/route', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          start_lat: start.lat,
+          start_lon: start.lon,
+          end_lat: destLat,
+          end_lon: destLon,
+          water_level_m: scenario.water_level_m,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || 'Route failed');
+
+      const map = mapRef.current;
+
+      map.getSource('route-direct').setData({
+        type: 'FeatureCollection',
+        features: [{
+          type: 'Feature',
+          properties: {},
+          geometry: { type: 'LineString', coordinates: data.direct_route },
+        }],
+      });
+
+      if (data.reachable && data.crosses_flood && data.safe_route) {
+        map.getSource('route-safe').setData({
+          type: 'FeatureCollection',
+          features: [{
+            type: 'Feature',
+            properties: {},
+            geometry: { type: 'LineString', coordinates: data.safe_route },
+          }],
+        });
+      } else {
+        map.getSource('route-safe').setData({ type: 'FeatureCollection', features: [] });
+      }
+
+      setDestinationPoint({ lat: destLat, lon: destLon, reachable: data.reachable });
+
+      setRouteInfo({
+        loading: false,
+        hospitalName: destinationName,
+        crossesFlood: data.crosses_flood,
+        reachable: data.reachable,
+        directLengthM: data.direct_length_m,
+        safeLengthM: data.safe_length_m,
+      });
+    } catch (err) {
+      setRouteInfo({ loading: false, hospitalName: destinationName, error: err.message });
+    }
+  }
 
   useEffect(() => {
     if (!scenario || mapRef.current) return;
@@ -206,10 +335,29 @@ export default function PlanWorkspace() {
 
       map.on('click', 'affected-facilities-layer', function (ev) {
         const p = ev.features[0].properties;
-        new maplibregl.Popup()
+        const coords = ev.features[0].geometry.coordinates;
+        const popupId = 'route-btn-' + Math.round(coords[0] * 100000) + '-' + Math.round(coords[1] * 100000);
+
+        const popup = new maplibregl.Popup()
           .setLngLat(ev.lngLat)
-          .setHTML('<strong>' + p.name + '</strong><br/><span style="color:#64748b">' + p.amenity + ' — affected</span>')
+          .setHTML(
+            '<div style="min-width:160px">' +
+            '<strong>' + p.name + '</strong><br/>' +
+            '<span style="color:#64748b">' + p.amenity + ' — affected</span><br/>' +
+            '<button id="' + popupId + '" style="margin-top:8px;width:100%;padding:6px;border:none;border-radius:8px;background:#2563eb;color:white;font-weight:700;font-size:12px;cursor:pointer;">🚑 Show route</button>' +
+            '</div>'
+          )
           .addTo(map);
+
+        setTimeout(function () {
+          const btn = document.getElementById(popupId);
+          if (btn) {
+            btn.addEventListener('click', function () {
+              runRoute(coords[1], coords[0], p.name);
+              popup.remove();
+            });
+          }
+        }, 0);
       });
 
       map.addSource('plan-markers', {
@@ -225,6 +373,94 @@ export default function PlanWorkspace() {
           'circle-color': ['get', 'color'],
           'circle-stroke-width': 3,
           'circle-stroke-color': '#ffffff',
+        },
+      });
+
+      map.addSource('start-point', {
+        type: 'geojson',
+        data: { type: 'FeatureCollection', features: [] },
+      });
+      map.addLayer({
+        id: 'start-point-layer',
+        type: 'circle',
+        source: 'start-point',
+        paint: {
+          'circle-radius': 10,
+          'circle-color': '#2563eb',
+          'circle-stroke-width': 4,
+          'circle-stroke-color': '#ffffff',
+        },
+      });
+
+      map.addSource('route-direct', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
+      map.addLayer({
+        id: 'route-direct-outline',
+        type: 'line',
+        source: 'route-direct',
+        paint: { 'line-color': '#ffffff', 'line-width': 8, 'line-opacity': 0.9 },
+      });
+      map.addLayer({
+        id: 'route-direct-line',
+        type: 'line',
+        source: 'route-direct',
+        paint: { 'line-color': '#ff6a00', 'line-width': 5 },
+      });
+
+      map.addSource('route-safe', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
+      map.addLayer({
+        id: 'route-safe-outline',
+        type: 'line',
+        source: 'route-safe',
+        paint: { 'line-color': '#ffffff', 'line-width': 8, 'line-opacity': 0.9 },
+      });
+      map.addLayer({
+        id: 'route-safe-line',
+        type: 'line',
+        source: 'route-safe',
+        paint: {
+          'line-color': '#00c853',
+          'line-width': 5,
+          'line-dasharray': [2, 1.5],
+        },
+      });
+
+      map.addSource('unreachable-hospitals', {
+        type: 'geojson',
+        data: { type: 'FeatureCollection', features: [] },
+      });
+      map.addLayer({
+        id: 'unreachable-hospitals-layer',
+        type: 'symbol',
+        source: 'unreachable-hospitals',
+        layout: {
+          'text-field': '✕',
+          'text-size': 26,
+          'text-allow-overlap': true,
+        },
+        paint: {
+          'text-color': '#000000',
+          'text-halo-color': '#ffffff',
+          'text-halo-width': 3.5,
+        },
+      });
+
+      map.addSource('destination-marker', {
+        type: 'geojson',
+        data: { type: 'FeatureCollection', features: [] },
+      });
+      map.addLayer({
+        id: 'destination-marker-layer',
+        type: 'symbol',
+        source: 'destination-marker',
+        layout: {
+          'text-field': ['case', ['get', 'reachable'], '✓', '✕'],
+          'text-size': 28,
+          'text-allow-overlap': true,
+        },
+        paint: {
+          'text-color': ['case', ['get', 'reachable'], '#16a34a', '#000000'],
+          'text-halo-color': '#ffffff',
+          'text-halo-width': 4,
         },
       });
 
@@ -247,7 +483,20 @@ export default function PlanWorkspace() {
 
       map.on('click', function (ev) {
         const toolKey = activeToolRef.current;
-        if (!toolKey || toolKey === 'closeRoad') return;
+        if (!toolKey) return;
+
+        if (toolKey === 'setStart') {
+          setStartPoint({ lat: ev.lngLat.lat, lon: ev.lngLat.lng });
+          return;
+        }
+
+        if (toolKey === 'routeToPoint') {
+          runRoute(ev.lngLat.lat, ev.lngLat.lng, 'Selected location');
+          return;
+        }
+
+        if (toolKey === 'closeRoad') return;
+
         const pool = planTypeRef.current === 'response' ? RESPONSE_TOOLS : PREVENTION_TOOLS;
         const toolDef = pool.find(function (t) { return t.key === toolKey; });
         if (!toolDef) return;
@@ -266,6 +515,7 @@ export default function PlanWorkspace() {
         });
       });
 
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- fires from the map's async 'load' event callback, not synchronously during the effect body
       setStatus('ready');
     });
   }, [scenario]);
@@ -303,6 +553,52 @@ export default function PlanWorkspace() {
       }),
     });
   }, [markers]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !map.getSource) return;
+    const src = map.getSource('start-point');
+    if (!src) return;
+
+    src.setData({
+      type: 'FeatureCollection',
+      features: startPoint
+        ? [{ type: 'Feature', properties: {}, geometry: { type: 'Point', coordinates: [startPoint.lon, startPoint.lat] } }]
+        : [],
+    });
+  }, [startPoint]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !map.getSource) return;
+    const src = map.getSource('unreachable-hospitals');
+    if (!src) return;
+
+    src.setData({
+      type: 'FeatureCollection',
+      features: unreachableHospitals.map(function (h) {
+        return { type: 'Feature', properties: { name: h.name }, geometry: { type: 'Point', coordinates: [h.lon, h.lat] } };
+      }),
+    });
+  }, [unreachableHospitals]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !map.getSource) return;
+    const src = map.getSource('destination-marker');
+    if (!src) return;
+
+    src.setData({
+      type: 'FeatureCollection',
+      features: destinationPoint
+        ? [{
+            type: 'Feature',
+            properties: { reachable: destinationPoint.reachable },
+            geometry: { type: 'Point', coordinates: [destinationPoint.lon, destinationPoint.lat] },
+          }]
+        : [],
+    });
+  }, [destinationPoint]);
 
   function addNote() {
     const text = noteDraft.trim();
@@ -508,6 +804,108 @@ export default function PlanWorkspace() {
             )}
           </div>
         )}
+
+        <div style={{ marginTop: 14, borderTop: '1px solid #e2e8f0', paddingTop: 12 }}>
+          <div style={{ fontSize: 12, fontWeight: 700, color: '#0f172a', marginBottom: 6 }}>
+            🚑 Rescue routing
+          </div>
+
+          <button
+            onClick={function () { setActiveTool(activeTool === 'setStart' ? null : 'setStart'); }}
+            style={{
+              width: '100%',
+              padding: '8px',
+              borderRadius: 9,
+              border: activeTool === 'setStart' ? '2px solid #2563eb' : '1px solid #e2e8f0',
+              background: activeTool === 'setStart' ? '#eff6ff' : '#f8fafc',
+              color: activeTool === 'setStart' ? '#2563eb' : '#475569',
+              fontSize: 11.5,
+              fontWeight: 700,
+              cursor: 'pointer',
+              marginBottom: 6,
+            }}
+          >
+            📍 {startPoint ? 'Change start point' : 'Set start point'}
+          </button>
+
+          <button
+            onClick={function () {
+              if (!startPoint) {
+                alert('Set a start point first.');
+                return;
+              }
+              setActiveTool(activeTool === 'routeToPoint' ? null : 'routeToPoint');
+            }}
+            style={{
+              width: '100%',
+              padding: '8px',
+              borderRadius: 9,
+              border: activeTool === 'routeToPoint' ? '2px solid #7c3aed' : '1px solid #e2e8f0',
+              background: activeTool === 'routeToPoint' ? '#f5f3ff' : '#f8fafc',
+              color: activeTool === 'routeToPoint' ? '#7c3aed' : '#475569',
+              fontSize: 11.5,
+              fontWeight: 700,
+              cursor: 'pointer',
+            }}
+          >
+            🎯 Route to any point
+          </button>
+
+          {activeTool === 'routeToPoint' && (
+            <div style={{ fontSize: 10.5, color: '#7c3aed', marginTop: 5 }}>
+              Click anywhere on the map — checks if it&apos;s reachable and draws the way there.
+            </div>
+          )}
+
+          {startPoint && checkingAccess && (
+            <div style={{ fontSize: 10.5, color: '#2563eb', marginTop: 6, fontWeight: 600 }}>
+              🔄 Checking access to all hospitals...
+            </div>
+          )}
+
+          {startPoint && !checkingAccess && (
+            <div
+              style={{
+                marginTop: 6,
+                padding: 8,
+                borderRadius: 9,
+                fontSize: 11,
+                fontWeight: 600,
+                background: unreachableHospitals.length > 0 ? '#fef2f2' : '#f0fdf4',
+                color: unreachableHospitals.length > 0 ? '#dc2626' : '#16a34a',
+              }}
+            >
+              {unreachableHospitals.length > 0
+                ? '❌ ' + unreachableHospitals.length + ' hospital(s) unreachable — marked ✕ on map'
+                : '✅ All ' + hospitalCount + ' hospitals reachable'}
+            </div>
+          )}
+
+          {routeInfo && !routeInfo.loading && !routeInfo.error && (
+            <div
+              style={{
+                marginTop: 8,
+                padding: 9,
+                borderRadius: 10,
+                background: routeInfo.reachable ? (routeInfo.crossesFlood ? '#fefce8' : '#f0fdf4') : '#fef2f2',
+                fontSize: 11,
+              }}
+            >
+              <b>{routeInfo.hospitalName}</b>
+              <div style={{ marginTop: 3 }}>
+                {!routeInfo.crossesFlood && '✅ Direct route is clear (' + (routeInfo.directLengthM / 1000).toFixed(2) + ' km)'}
+                {routeInfo.crossesFlood && routeInfo.reachable && '⚠️ Direct route floods — using detour (' + (routeInfo.safeLengthM / 1000).toFixed(2) + ' km)'}
+                {!routeInfo.reachable && '❌ No route — that location is cut off by this flood'}
+              </div>
+            </div>
+          )}
+
+          {routeInfo && routeInfo.error && (
+            <div style={{ marginTop: 8, padding: 9, borderRadius: 10, background: '#fef2f2', color: '#dc2626', fontSize: 11 }}>
+              {routeInfo.error}
+            </div>
+          )}
+        </div>
 
         <div style={{ marginTop: 14, borderTop: '1px solid #e2e8f0', paddingTop: 12 }}>
           <div style={{ fontSize: 12, fontWeight: 700, color: '#0f172a', marginBottom: 6 }}>

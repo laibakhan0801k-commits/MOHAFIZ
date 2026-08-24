@@ -12,6 +12,7 @@ from dotenv import load_dotenv
 from database import SessionLocal, User, Scenario
 import flood_engine
 import road_flooding
+import routing
 
 load_dotenv()
 SECRET_KEY = os.getenv("SECRET_KEY")
@@ -42,6 +43,13 @@ class FloodRequest(BaseModel):
     cause_type: str
     params: dict
     user_id: str
+
+class RouteRequest(BaseModel):
+    start_lat: float
+    start_lon: float
+    end_lat: float
+    end_lon: float
+    water_level_m: float
 
 @app.get("/")
 def read_root():
@@ -159,6 +167,34 @@ def run_flood_scenario(request: FloodRequest, db: Session = Depends(get_db)):
         }
     except HTTPException:
         raise
+    except Exception as e:
+        import traceback
+        raise HTTPException(status_code=500, detail=str(type(e).__name__) + ": " + str(e) + " | " + traceback.format_exc()[-500:])
+
+
+@app.post("/route")
+def get_route(request: RouteRequest):
+    try:
+        direct = routing.find_route(request.start_lat, request.start_lon, request.end_lat, request.end_lon)
+        crosses = routing.route_crosses_flood(direct, request.water_level_m)
+
+        if crosses:
+            safe = routing.find_flood_safe_route(
+                request.start_lat, request.start_lon,
+                request.end_lat, request.end_lon,
+                request.water_level_m
+            )
+        else:
+            safe = direct
+
+        return {
+            "direct_route": direct["coords"],
+            "direct_length_m": direct["length_m"],
+            "crosses_flood": crosses,
+            "reachable": safe.get("reachable", True),
+            "safe_route": safe["coords"] if safe.get("reachable") else None,
+            "safe_length_m": safe.get("length_m") if safe.get("reachable") else None,
+        }
     except Exception as e:
         import traceback
         raise HTTPException(status_code=500, detail=str(type(e).__name__) + ": " + str(e) + " | " + traceback.format_exc()[-500:])
