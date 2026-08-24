@@ -6,9 +6,12 @@ from datetime import datetime, timedelta
 import bcrypt
 from jose import jwt
 import os
+import json
 from dotenv import load_dotenv
 
-from database import SessionLocal, User
+from database import SessionLocal, User, Scenario
+import flood_engine
+import road_flooding
 
 load_dotenv()
 SECRET_KEY = os.getenv("SECRET_KEY")
@@ -24,7 +27,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# This gives each request its own database session, and closes it when done
 def get_db():
     db = SessionLocal()
     try:
@@ -32,10 +34,14 @@ def get_db():
     finally:
         db.close()
 
-# Defines what a signup/login request must look like
 class UserAuth(BaseModel):
     email: EmailStr
     password: str
+
+class FloodRequest(BaseModel):
+    cause_type: str  # "rainfall" | "river_overflow" | "drainage_failure" | "dam_release"
+    params: dict      # e.g. {"intensity_mm_per_hr": 50, "duration_hr": 3}
+    user_id: str      # whoever is running this scenario
 
 @app.get("/")
 def read_root():
@@ -75,3 +81,78 @@ def login(user: UserAuth, db: Session = Depends(get_db)):
     token = jwt.encode(token_data, SECRET_KEY, algorithm=ALGORITHM)
 
     return {"access_token": token, "token_type": "bearer"}
+
+
+FRAME_COUNT = 6
+
+@app.post("/flood")
+def run_flood_scenario(request: FloodRequest, db: Session = Depends(get_db)):
+    try:
+        if request.cause_type == "rainfall":
+            severity = flood_engine.rainfall_severity(**request.params)
+        elif request.cause_type == "river_overflow":
+            severity = flood_engine.river_overflow_severity(**request.params)
+        elif request.cause_type == "drainage_failure":
+            severity = flood_engine.drainage_failure_severity(**request.params)
+        elif request.cause_type == "dam_release":
+            severity = flood_engine.dam_release_severity(**request.params)
+        else:
+            raise HTTPException(status_code=400, detail=f"Unknown cause_type: {request.cause_type}")
+
+        # Build a short rising sequence from a low starting point up to the
+        # real target severity, so the frontend can animate water rising
+        # instead of the flood just popping in at full extent.
+        start_severity = max(3, severity * 0.15)
+        frame_severities = [
+            start_severity + (severity - start_severity) * (i / (FRAME_COUNT - 1))
+            for i in range(FRAME_COUNT)
+        ]
+
+        frames = []
+        for s in frame_severities:
+            wl = flood_engine.severity_to_water_level(s)
+            mask, stats = flood_engine.compute_flood_extent(wl)
+            img = flood_engine.render_flood_png_base64(mask)
+            frames.append({
+                "severity": round(s, 1),
+                "water_level_m": round(wl, 1),
+                "flooded_percent": stats["flooded_percent"],
+                "flood_image": img,
+            })
+
+        final = frames[-1]
+        water_level_m = final["water_level_m"]
+
+        road_result = road_flooding.get_flooded_roads(water_level_m)
+        west, south, east, north = flood_engine.get_dem_bounds()
+
+        scenario = Scenario(
+            user_id=request.user_id,
+            cause_type=request.cause_type,
+            input_params=json.dumps(request.params),
+            severity=severity,
+            water_level_m=water_level_m,
+            flooded_percent=final["flooded_percent"],
+        )
+        db.add(scenario)
+        db.commit()
+        db.refresh(scenario)
+
+        return {
+            "scenario_id": scenario.id,
+            "cause_type": request.cause_type,
+            "severity": round(severity, 1),
+            "water_level_m": water_level_m,
+            "flooded_percent": final["flooded_percent"],
+            "flood_image": final["flood_image"],
+            "flood_image_bounds": [west, south, east, north],
+            "flooded_road_count": road_result["flooded_edge_count"],
+            "clear_road_count": road_result["clear_edge_count"],
+            "flooded_roads": [e["coords"] for e in road_result["flooded_edges"]],
+            "frames": frames,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {str(e)} | {traceback.format_exc()[-500:]}")

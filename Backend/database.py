@@ -1,6 +1,6 @@
 import os
 from dotenv import load_dotenv
-from sqlalchemy import create_engine, Column, String, DateTime
+from sqlalchemy import create_engine, Column, String, DateTime, Float, ForeignKey
 from sqlalchemy.orm import declarative_base, sessionmaker
 from sqlalchemy.sql import func
 import uuid
@@ -20,6 +20,19 @@ class User(Base):
     password_hash = Column(String, nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
-# This line actually creates the table in Supabase if it doesn't exist yet
+
+class Scenario(Base):
+    __tablename__ = "scenarios"
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(String, ForeignKey("users.id"), nullable=False)
+    cause_type = Column(String, nullable=False)  # rainfall / river_overflow / drainage_failure / dam_release
+    input_params = Column(String, nullable=False)  # JSON string of the inputs used, e.g. {"intensity_mm_per_hr": 50}
+    severity = Column(Float, nullable=False)
+    water_level_m = Column(Float, nullable=False)
+    flooded_percent = Column(Float, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+# This line actually creates the tables in Supabase if they don't exist yet
 Base.metadata.create_all(bind=engine)
-print("Users table created (or already exists)")
+print("Users + Scenarios tables created (or already exist)")
