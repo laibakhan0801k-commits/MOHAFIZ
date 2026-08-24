@@ -14,6 +14,7 @@ labelled clearly so they can be explained and defended in a Q&A.
 """
 
 import io
+import json
 import base64
 import rasterio
 import numpy as np
@@ -160,3 +161,107 @@ def render_flood_png_base64(flooded_mask):
     img.save(buffer, format="PNG")
     encoded = base64.b64encode(buffer.getvalue()).decode("utf-8")
     return f"data:image/png;base64,{encoded}"
+
+def get_flooded_bbox(flooded_mask, min_span_deg=0.01):
+    """
+    Returns [west, south, east, north] — the tight bounding box around
+    ONLY the actually-flooded pixels, not the whole study area.
+    """
+    west, south, east, north = get_dem_bounds()
+    H, W = flooded_mask.shape
+    rows, cols = np.where(flooded_mask)
+
+    if len(rows) == 0:
+        return None
+
+    row_min, row_max = int(rows.min()), int(rows.max())
+    col_min, col_max = int(cols.min()), int(cols.max())
+
+    f_west = west + (col_min / W) * (east - west)
+    f_east = west + ((col_max + 1) / W) * (east - west)
+    f_north = north - (row_min / H) * (north - south)
+    f_south = north - ((row_max + 1) / H) * (north - south)
+
+    if (f_east - f_west) < min_span_deg:
+        cx = (f_east + f_west) / 2
+        f_west, f_east = cx - min_span_deg / 2, cx + min_span_deg / 2
+    if (f_north - f_south) < min_span_deg:
+        cy = (f_north + f_south) / 2
+        f_south, f_north = cy - min_span_deg / 2, cy + min_span_deg / 2
+
+    f_west, f_south = max(f_west, west), max(f_south, south)
+    f_east, f_north = min(f_east, east), min(f_north, north)
+
+    return [f_west, f_south, f_east, f_north]
+
+
+def load_dem_dataset():
+    global _dem_dataset_cache
+    if "_dem_dataset_cache" not in globals() or globals()["_dem_dataset_cache"] is None:
+        globals()["_dem_dataset_cache"] = rasterio.open(DEM_PATH)
+    return globals()["_dem_dataset_cache"]
+
+
+def load_buildings():
+    global _buildings_cache
+    if "_buildings_cache" not in globals() or globals()["_buildings_cache"] is None:
+        with open("buildings.geojson", encoding="utf-8") as f:
+            globals()["_buildings_cache"] = json.load(f)
+    return globals()["_buildings_cache"]
+
+
+def count_affected_buildings(water_level_m: float) -> int:
+    data = load_buildings()
+    count = 0
+    for feature in data["features"]:
+        elev = feature["properties"].get("base_elevation_m")
+        if elev is not None and elev <= water_level_m:
+            count += 1
+    return count
+
+
+def load_facilities():
+    global _facilities_cache
+    if "_facilities_cache" not in globals() or globals()["_facilities_cache"] is None:
+        with open("facilities.geojson", encoding="utf-8") as f:
+            globals()["_facilities_cache"] = json.load(f)
+    return globals()["_facilities_cache"]
+
+
+def _facility_centroid_lonlat(feature):
+    geom = feature["geometry"]
+    if geom["type"] == "Point":
+        return geom["coordinates"][0], geom["coordinates"][1]
+    if geom["type"] == "Polygon":
+        ring = geom["coordinates"][0]
+        return sum(p[0] for p in ring) / len(ring), sum(p[1] for p in ring) / len(ring)
+    if geom["type"] == "MultiPolygon":
+        ring = geom["coordinates"][0][0]
+        return sum(p[0] for p in ring) / len(ring), sum(p[1] for p in ring) / len(ring)
+    return None
+
+
+def list_affected_facilities(water_level_m: float, limit: int = 25):
+    data = load_facilities()
+    dem_ds = load_dem_dataset()
+    affected = []
+
+    for feature in data["features"]:
+        c = _facility_centroid_lonlat(feature)
+        if c is None:
+            continue
+        lon, lat = c
+        sampled = list(dem_ds.sample([(lon, lat)]))
+        elev = float(sampled[0][0])
+        if elev <= water_level_m:
+            props = feature["properties"]
+            affected.append({
+                "name": props.get("name") or "Unnamed",
+                "amenity": props.get("amenity"),
+                "lat": lat,
+                "lon": lon,
+            })
+
+    priority = {"hospital": 0, "clinic": 0, "doctors": 0}
+    affected.sort(key=lambda f: priority.get(f["amenity"], 1))
+    return affected[:limit]

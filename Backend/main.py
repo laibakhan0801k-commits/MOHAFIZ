@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Depends
+﻿from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, EmailStr
 from sqlalchemy.orm import Session
@@ -39,9 +39,9 @@ class UserAuth(BaseModel):
     password: str
 
 class FloodRequest(BaseModel):
-    cause_type: str  # "rainfall" | "river_overflow" | "drainage_failure" | "dam_release"
-    params: dict      # e.g. {"intensity_mm_per_hr": 50, "duration_hr": 3}
-    user_id: str      # whoever is running this scenario
+    cause_type: str
+    params: dict
+    user_id: str
 
 @app.get("/")
 def read_root():
@@ -97,11 +97,8 @@ def run_flood_scenario(request: FloodRequest, db: Session = Depends(get_db)):
         elif request.cause_type == "dam_release":
             severity = flood_engine.dam_release_severity(**request.params)
         else:
-            raise HTTPException(status_code=400, detail=f"Unknown cause_type: {request.cause_type}")
+            raise HTTPException(status_code=400, detail="Unknown cause_type")
 
-        # Build a short rising sequence from a low starting point up to the
-        # real target severity, so the frontend can animate water rising
-        # instead of the flood just popping in at full extent.
         start_severity = max(3, severity * 0.15)
         frame_severities = [
             start_severity + (severity - start_severity) * (i / (FRAME_COUNT - 1))
@@ -123,8 +120,14 @@ def run_flood_scenario(request: FloodRequest, db: Session = Depends(get_db)):
         final = frames[-1]
         water_level_m = final["water_level_m"]
 
+        final_mask, _ = flood_engine.compute_flood_extent(water_level_m)
+        flooded_bbox = flood_engine.get_flooded_bbox(final_mask)
+
         road_result = road_flooding.get_flooded_roads(water_level_m)
         west, south, east, north = flood_engine.get_dem_bounds()
+
+        affected_building_count = flood_engine.count_affected_buildings(water_level_m)
+        affected_facilities = flood_engine.list_affected_facilities(water_level_m)
 
         scenario = Scenario(
             user_id=request.user_id,
@@ -146,13 +149,16 @@ def run_flood_scenario(request: FloodRequest, db: Session = Depends(get_db)):
             "flooded_percent": final["flooded_percent"],
             "flood_image": final["flood_image"],
             "flood_image_bounds": [west, south, east, north],
+            "flooded_bbox": flooded_bbox,
             "flooded_road_count": road_result["flooded_edge_count"],
             "clear_road_count": road_result["clear_edge_count"],
             "flooded_roads": [e["coords"] for e in road_result["flooded_edges"]],
+            "affected_building_count": affected_building_count,
+            "affected_facilities": affected_facilities,
             "frames": frames,
         }
     except HTTPException:
         raise
     except Exception as e:
         import traceback
-        raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {str(e)} | {traceback.format_exc()[-500:]}")
+        raise HTTPException(status_code=500, detail=str(type(e).__name__) + ": " + str(e) + " | " + traceback.format_exc()[-500:])

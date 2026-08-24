@@ -1,7 +1,7 @@
-import json
+﻿import json
 import rasterio
 
-with open("buildings.geojson") as f:
+with open("buildings.geojson", encoding="utf-8") as f:
     data = json.load(f)
 
 dem = rasterio.open("elevation.tif")
@@ -28,7 +28,7 @@ for feature in data["features"]:
     feature["properties"]["base_elevation_m"] = float(sampled[0][0])
     updated += 1
 
-with open("buildings.geojson", "w") as f:
-    json.dump(data, f)
+with open("buildings.geojson", "w", encoding="utf-8") as f:
+    json.dump(data, f, ensure_ascii=False)
 
-print(f"Updated {updated} buildings with base_elevation_m")
+print("Updated " + str(updated) + " buildings with base_elevation_m")

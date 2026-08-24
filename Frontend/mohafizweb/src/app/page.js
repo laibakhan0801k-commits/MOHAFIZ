@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import { useState } from "react";
 import { Space_Grotesk } from "next/font/google";
@@ -11,10 +11,10 @@ const display = Space_Grotesk({
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
 
 export default function Home() {
-  const [mode, setMode] = useState("login"); // "login" | "signup"
+  const [mode, setMode] = useState("login");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [status, setStatus] = useState("idle"); // idle | loading | success | error
+  const [status, setStatus] = useState("idle");
   const [message, setMessage] = useState("");
   const [token, setToken] = useState(null);
 
@@ -25,10 +25,10 @@ export default function Home() {
     setToken(null);
 
     try {
-      const res = await fetch(`${API_URL}/${mode}`, {
+      const res = await fetch(API_URL + "/" + mode, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email, password }),
+        body: JSON.stringify({ email: email, password: password }),
       });
       const data = await res.json();
 
@@ -54,7 +54,6 @@ export default function Home() {
 
   return (
     <div className="flex min-h-screen w-full bg-[#080D18] text-[#E7EEF7]">
-      {/* Left: identity panel */}
       <div className="relative hidden w-1/2 overflow-hidden bg-gradient-to-br from-[#0B1220] to-[#0F1E30] md:flex md:flex-col md:justify-between md:p-12">
         <svg
           className="pointer-events-none absolute inset-0 h-full w-full opacity-[0.18]"
@@ -71,7 +70,7 @@ export default function Home() {
         </svg>
 
         <div className="relative z-10">
-          <h1 className={`${display.className} text-3xl font-bold tracking-tight text-[#E7EEF7]`}>
+          <h1 className={display.className + " text-3xl font-bold tracking-tight text-[#E7EEF7]"}>
             MOHAFIZ
           </h1>
           <p className="mt-3 max-w-sm text-sm leading-6 text-[#7C8BA3]">
@@ -87,33 +86,24 @@ export default function Home() {
         </div>
       </div>
 
-      {/* Right: auth form */}
       <div className="flex w-full flex-col items-center justify-center px-6 py-16 md:w-1/2">
         <div className="w-full max-w-sm">
-          <div className={`${display.className} mb-1 text-xl font-medium md:hidden`}>
+          <div className={display.className + " mb-1 text-xl font-medium md:hidden"}>
             MOHAFIZ
           </div>
 
           <div className="mb-8 flex gap-1 rounded-lg border border-white/[.08] bg-white/[.02] p-1">
             <button
               type="button"
-              onClick={() => { setMode("login"); setStatus("idle"); setMessage(""); }}
-              className={`flex-1 rounded-md py-2 text-sm font-medium transition-colors ${
-                mode === "login"
-                  ? "bg-[#2DD4BF] text-[#06231F]"
-                  : "text-[#7C8BA3] hover:text-[#E7EEF7]"
-              }`}
+              onClick={function () { setMode("login"); setStatus("idle"); setMessage(""); }}
+              className={"flex-1 rounded-md py-2 text-sm font-medium transition-colors " + (mode === "login" ? "bg-[#2DD4BF] text-[#06231F]" : "text-[#7C8BA3] hover:text-[#E7EEF7]")}
             >
               Log in
             </button>
             <button
               type="button"
-              onClick={() => { setMode("signup"); setStatus("idle"); setMessage(""); }}
-              className={`flex-1 rounded-md py-2 text-sm font-medium transition-colors ${
-                mode === "signup"
-                  ? "bg-[#2DD4BF] text-[#06231F]"
-                  : "text-[#7C8BA3] hover:text-[#E7EEF7]"
-              }`}
+              onClick={function () { setMode("signup"); setStatus("idle"); setMessage(""); }}
+              className={"flex-1 rounded-md py-2 text-sm font-medium transition-colors " + (mode === "signup" ? "bg-[#2DD4BF] text-[#06231F]" : "text-[#7C8BA3] hover:text-[#E7EEF7]")}
             >
               Sign up
             </button>
@@ -130,7 +120,7 @@ export default function Home() {
                 required
                 autoComplete="email"
                 value={email}
-                onChange={(e) => setEmail(e.target.value)}
+                onChange={function (e) { setEmail(e.target.value); }}
                 className="w-full rounded-lg border border-white/[.08] bg-white/[.03] px-3.5 py-2.5 text-sm text-[#E7EEF7] outline-none placeholder:text-[#4C6079] focus:border-[#2DD4BF]/50 focus:ring-2 focus:ring-[#2DD4BF]/20"
                 placeholder="you@example.com"
               />
@@ -147,7 +137,7 @@ export default function Home() {
                 minLength={8}
                 autoComplete={mode === "login" ? "current-password" : "new-password"}
                 value={password}
-                onChange={(e) => setPassword(e.target.value)}
+                onChange={function (e) { setPassword(e.target.value); }}
                 className="w-full rounded-lg border border-white/[.08] bg-white/[.03] px-3.5 py-2.5 text-sm text-[#E7EEF7] outline-none placeholder:text-[#4C6079] focus:border-[#2DD4BF]/50 focus:ring-2 focus:ring-[#2DD4BF]/20"
                 placeholder="••••••••"
               />
@@ -158,21 +148,13 @@ export default function Home() {
               disabled={status === "loading"}
               className="w-full rounded-lg bg-[#2DD4BF] py-2.5 text-sm font-semibold text-[#06231F] transition-opacity hover:opacity-90 disabled:opacity-50"
             >
-              {status === "loading"
-                ? "Working..."
-                : mode === "login"
-                ? "Log in"
-                : "Create account"}
+              {status === "loading" ? "Working..." : mode === "login" ? "Log in" : "Create account"}
             </button>
           </form>
 
           {message && (
             <div
-              className={`mt-4 rounded-lg border px-3.5 py-2.5 text-sm ${
-                status === "error"
-                  ? "border-[#FB7185]/30 bg-[#FB7185]/10 text-[#FB7185]"
-                  : "border-[#2DD4BF]/30 bg-[#2DD4BF]/10 text-[#2DD4BF]"
-              }`}
+              className={"mt-4 rounded-lg border px-3.5 py-2.5 text-sm " + (status === "error" ? "border-[#FB7185]/30 bg-[#FB7185]/10 text-[#FB7185]" : "border-[#2DD4BF]/30 bg-[#2DD4BF]/10 text-[#2DD4BF]")}
             >
               {message}
             </div>

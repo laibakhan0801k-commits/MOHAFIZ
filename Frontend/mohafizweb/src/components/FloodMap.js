@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
+import { useRouter } from 'next/navigation';
 import * as maplibregl from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
 
@@ -77,6 +78,7 @@ const CAUSES = [
 
 export default function FloodMap() {
   const mapContainer = useRef(null);
+    const router = useRouter();
   const mapRef = useRef(null);
   const [status, setStatus] = useState('loading map...');
   const [opacity, setOpacity] = useState(0.4);
@@ -777,7 +779,29 @@ export default function FloodMap() {
             </div>
           </div>
         )}
-
+        {floodResult && (
+          <button
+            onClick={() => {
+              sessionStorage.setItem('mohafiz_scenario', JSON.stringify(floodResult));
+              router.push('/plan');
+            }}
+            style={{
+              width: '100%',
+              marginTop: '12px',
+              padding: '12px',
+              borderRadius: '14px',
+              border: 'none',
+              background: 'linear-gradient(135deg, #dc2626, #b91c1c)',
+              color: 'white',
+              fontWeight: 800,
+              fontSize: '14px',
+              cursor: 'pointer',
+              boxShadow: '0 6px 16px #dc262655',
+            }}
+          >
+            🗺️ Open Response Plan →
+          </button>
+        )}
         <div style={{ marginTop: '12px', fontSize: '10px', color: '#94a3b8' }}>
           running as test account —{' '}
           <input
