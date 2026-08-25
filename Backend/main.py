@@ -22,7 +22,7 @@ app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=["http://localhost:3000", "http://localhost:3001"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -107,6 +107,19 @@ def run_flood_scenario(request: FloodRequest, db: Session = Depends(get_db)):
         else:
             raise HTTPException(status_code=400, detail="Unknown cause_type")
 
+        # Rainfall and drainage failure have a REAL water volume, so they use
+        # the volume-conserving model. River overflow and dam release describe
+        # a water LEVEL directly, so they keep the percentile mapping.
+        if request.cause_type == "rainfall":
+            raw_rain_mm = request.params["intensity_mm_per_hr"] * request.params["duration_hr"]
+            use_volume_model = True
+        elif request.cause_type == "drainage_failure":
+            raw_rain_mm = 4 + request.params["rainfall_mm"]
+            use_volume_model = True
+        else:
+            raw_rain_mm = 0
+            use_volume_model = False
+
         start_severity = max(3, severity * 0.15)
         frame_severities = [
             start_severity + (severity - start_severity) * (i / (FRAME_COUNT - 1))
@@ -115,7 +128,11 @@ def run_flood_scenario(request: FloodRequest, db: Session = Depends(get_db)):
 
         frames = []
         for s in frame_severities:
-            wl = flood_engine.severity_to_water_level(s)
+            if use_volume_model and severity > 0:
+                frame_rain_mm = raw_rain_mm * (s / severity)
+                wl = flood_engine.rainfall_to_water_level(frame_rain_mm)
+            else:
+                wl = flood_engine.severity_to_water_level(s)
             mask, stats = flood_engine.compute_flood_extent(wl)
             img = flood_engine.render_flood_png_base64(mask)
             frames.append({
@@ -154,6 +171,9 @@ def run_flood_scenario(request: FloodRequest, db: Session = Depends(get_db)):
             "cause_type": request.cause_type,
             "severity": round(severity, 1),
             "water_level_m": water_level_m,
+            "avg_depth_m": flood_engine.compute_depth_stats(water_level_m)["avg_depth_m"],
+            "max_depth_m": flood_engine.compute_depth_stats(water_level_m)["max_depth_m"],
+            "water_depth_m": round(max(0, water_level_m - float(flood_engine.load_dem()[1].min())), 1),
             "flooded_percent": final["flooded_percent"],
             "flood_image": final["flood_image"],
             "flood_image_bounds": [west, south, east, north],

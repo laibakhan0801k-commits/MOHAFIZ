@@ -42,8 +42,12 @@ def get_flooded_roads(water_level_m: float):
     coords = [(G.nodes[n]["x"], G.nodes[n]["y"]) for n in node_ids]  # (lon, lat)
     elevations = [val[0] for val in dem.sample(coords)]
 
+    # DEM nodata pixels come back as large negative numbers (e.g. -32768).
+    # Without this guard they always compare as "below water level" and get
+    # falsely flagged as flooded even at zero severity.
+    NODATA_FLOOR = -1000
     node_flooded = {
-        node_id: (elev <= water_level_m)
+        node_id: (elev > NODATA_FLOOR and elev <= water_level_m)
         for node_id, elev in zip(node_ids, elevations)
     }
 

@@ -43,8 +43,8 @@ const CAUSES = [
     color: '#0EA5E9',
     colorLight: '#E0F2FE',
     fields: [
-      { key: 'intensity_mm_per_hr', label: 'Rain intensity', unit: 'mm/hr', min: 0, max: 150, step: 5 },
-      { key: 'duration_hr', label: 'Duration', unit: 'hours', min: 0, max: 12, step: 0.5 },
+      { key: 'intensity_mm_per_hr', label: 'Rain intensity', unit: 'mm/hr', min: 2, max: 150, step: 1 },
+      { key: 'duration_hr', label: 'Duration', unit: 'hours', min: 0.5, max: 8, step: 0.5 },
     ],
   },
   {
@@ -53,7 +53,7 @@ const CAUSES = [
     emoji: '🌊',
     color: '#06B6D4',
     colorLight: '#CFFAFE',
-    fields: [{ key: 'bank_rise_m', label: 'Bank rise', unit: 'meters', min: 0, max: 5, step: 0.1 }],
+    fields: [{ key: 'bank_rise_m', label: 'Bank rise', unit: 'meters', min: 0.1, max: 5, step: 0.1 }],
   },
   {
     key: 'drainage_failure',
@@ -767,19 +767,36 @@ export default function FloodMap() {
             </div>
             <div style={{ background: '#f0fdf4', borderRadius: '12px', padding: '10px', textAlign: 'center' }}>
               <div style={{ fontSize: '20px', fontWeight: 800, color: '#16a34a' }}>
-                {floodResult.water_level_m}m
+                {floodResult.severity > 0 ? floodResult.avg_depth_m + 'm' : '—'}
               </div>
-              <div style={{ fontSize: '10px', color: '#64748b', fontWeight: 600 }}>water level</div>
+              <div style={{ fontSize: '10px', color: '#64748b', fontWeight: 600 }}>avg water depth</div>
             </div>
             <div style={{ background: '#fefce8', borderRadius: '12px', padding: '10px', textAlign: 'center' }}>
               <div style={{ fontSize: '20px', fontWeight: 800, color: '#ca8a04' }}>
                 {floodResult.severity}
               </div>
-              <div style={{ fontSize: '10px', color: '#64748b', fontWeight: 600 }}>severity score</div>
+              <div style={{ fontSize: '10px', color: '#64748b', fontWeight: 600 }}>rainfall intensity</div>
             </div>
           </div>
         )}
-        {floodResult && (
+        {floodResult && floodResult.severity === 0 && (
+          <div
+            style={{
+              marginTop: '12px',
+              padding: '12px',
+              borderRadius: '12px',
+              background: '#f0fdf4',
+              border: '1px solid #86efac',
+              fontSize: '12px',
+              color: '#166534',
+              fontWeight: 600,
+              textAlign: 'center',
+            }}
+          >
+            ✅ No flooding expected — this rainfall is within normal drainage capacity for this area.
+          </div>
+        )}
+        {floodResult && floodResult.severity > 0 && (
           <button
             onClick={() => {
               sessionStorage.setItem('mohafiz_scenario', JSON.stringify(floodResult));

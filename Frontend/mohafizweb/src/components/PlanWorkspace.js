@@ -728,7 +728,7 @@ export default function PlanWorkspace() {
           <span><b style={{ color: '#f87171' }}>{scenario.affected_building_count}</b> buildings</span>
           <span><b style={{ color: '#f87171' }}>{scenario.flooded_road_count}</b> roads flooded</span>
           <span><b style={{ color: '#f87171' }}>{hospitalCount}</b> hospitals at risk</span>
-          <span><b style={{ color: '#38bdf8' }}>{scenario.water_level_m}m</b> water</span>
+          <span><b style={{ color: '#38bdf8' }}>{scenario.avg_depth_m}m</b> avg depth</span>
         </div>
       </div>
 
