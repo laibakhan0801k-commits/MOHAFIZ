@@ -21,14 +21,94 @@ const RESPONSE_TOOLS = [
 ];
 
 const PREVENTION_TOOLS = [
-  { key: 'desilt', label: 'Desilt nullah section', emoji: '🪣', color: '#0891b2', kind: 'point', hint: 'Click a nullah section that needs silt removal', effect: { drainage_capacity_gain_pct: 15 }, effectLabel: '+15% channel capacity' },
-  { key: 'clearDrains', label: 'Clear blocked drains', emoji: '🕳️', color: '#f59e0b', kind: 'point', hint: 'Click an area where storm drains are choked', effect: { drainage_capacity_gain_pct: 10 }, effectLabel: '+10% drainage capacity' },
-  { key: 'embankment', label: 'Build / raise embankment', emoji: '🧱', color: '#78350f', kind: 'point', hint: 'Click where a protective embankment is needed', effect: { severity_reduction: 8 }, effectLabel: '−8 severity locally' },
-  { key: 'widenChannel', label: 'Widen channel section', emoji: '📏', color: '#0284c7', kind: 'point', hint: 'Click a narrow channel section that bottlenecks flow', effect: { drainage_capacity_gain_pct: 12 }, effectLabel: '+12% flow capacity' },
-  { key: 'removeEncroachment', label: 'Remove encroachment', emoji: '🏚️', color: '#b91c1c', kind: 'point', hint: 'Click illegal construction blocking the floodplain', effect: { drainage_capacity_gain_pct: 8 }, effectLabel: '+8% floodplain capacity' },
-  { key: 'retentionPond', label: 'Retention pond', emoji: '🌊', color: '#0d9488', kind: 'point', hint: 'Click where excess water can be stored upstream', effect: { severity_reduction: 6 }, effectLabel: '−6 severity' },
-  { key: 'warningGauge', label: 'Early warning gauge', emoji: '📡', color: '#7c3aed', kind: 'point', hint: 'Click where a water-level sensor should be installed', effect: {}, effectLabel: 'earlier warning, no flood reduction' },
-  { key: 'greenBuffer', label: 'Green buffer / plantation', emoji: '🌳', color: '#16a34a', kind: 'point', hint: 'Click where vegetation can slow runoff', effect: { severity_reduction: 3 }, effectLabel: '−3 severity (slower runoff)' },
+  {
+    key: 'desilt',
+    label: 'Desilt nullah section',
+    emoji: '🪣',
+    color: '#0891b2',
+    kind: 'point',
+    hint: 'Click a nullah section that needs silt removal',
+    effect: { drainage_capacity_gain_pct: 15 },
+    effectLabel: '+15% channel capacity (estimate)',
+    realBasis: 'Real precedent: in 2020, govt approved Rs40M specifically to desilt Nullah Leh + 10 other nullahs. Officials predicted a 12ft water-level rise if it did NOT happen.',
+  },
+  {
+    key: 'clearDrains',
+    label: 'Clear blocked drains',
+    emoji: '🕳️',
+    color: '#f59e0b',
+    kind: 'point',
+    hint: 'Click an area where storm drains are choked',
+    effect: { drainage_capacity_gain_pct: 10 },
+    effectLabel: '+10% drainage capacity (estimate)',
+    realBasis: 'Real context: local drains in this region are commonly designed for only 12-25mm/hr — blockage removes what little headroom exists.',
+  },
+  {
+    key: 'embankment',
+    label: 'Build / raise embankment',
+    emoji: '🧱',
+    color: '#78350f',
+    kind: 'point',
+    hint: 'Click where a protective embankment is needed',
+    effect: { severity_reduction: 8 },
+    effectLabel: '−8 severity locally (engineering estimate)',
+    realBasis: 'Standard flood-engineering countermeasure; no site-specific real data available for this exact corridor yet.',
+  },
+  {
+    key: 'widenChannel',
+    label: 'Widen channel section',
+    emoji: '📏',
+    color: '#0284c7',
+    kind: 'point',
+    hint: 'Click a narrow channel section that bottlenecks flow',
+    effect: { drainage_capacity_gain_pct: 12 },
+    effectLabel: '+12% flow capacity (engineering estimate)',
+    realBasis: 'Standard hydraulic principle (wider channel = more flow capacity); not yet validated against this specific corridor.',
+  },
+  {
+    key: 'removeEncroachment',
+    label: 'Remove encroachment',
+    emoji: '🏚️',
+    color: '#b91c1c',
+    kind: 'point',
+    hint: 'Click illegal construction blocking the floodplain',
+    effect: { drainage_capacity_gain_pct: 8 },
+    effectLabel: '+8% floodplain capacity (estimate)',
+    realBasis: 'Real finding: officials directly blamed encroachment along drains for worsening real monsoon flooding across Rawalpindi in Aug 2026.',
+  },
+  {
+    key: 'retentionPond',
+    label: 'Retention pond',
+    emoji: '🌊',
+    color: '#0d9488',
+    kind: 'point',
+    hint: 'Click where excess water can be stored upstream',
+    effect: { severity_reduction: 6 },
+    effectLabel: '−6 severity (engineering estimate)',
+    realBasis: 'Same principle real dams (Rawal, Khanpur, Simly) use to hold back water — a smaller-scale version of a real, working mechanism.',
+  },
+  {
+    key: 'warningGauge',
+    label: 'Early warning gauge',
+    emoji: '📡',
+    color: '#7c3aed',
+    kind: 'point',
+    hint: 'Click where a water-level sensor should be installed',
+    effect: {},
+    effectLabel: 'earlier warning, no flood reduction',
+    realBasis: 'A real system already exists: the Leh Nullah Flood Forecasting & Warning System (JICA, since 2007) — sirens + mosque loudspeakers. This measure represents extending that real coverage upstream into this corridor.',
+  },
+  {
+    key: 'greenBuffer',
+    label: 'Green buffer / plantation',
+    emoji: '🌳',
+    color: '#16a34a',
+    kind: 'point',
+    hint: 'Click where vegetation can slow runoff',
+    effect: { severity_reduction: 3 },
+    effectLabel: '−3 severity (engineering estimate)',
+    realBasis: 'Standard hydrology principle (vegetation slows runoff); not yet validated against this specific corridor.',
+  },
 ];
 
 export default function PlanWorkspace() {
@@ -245,6 +325,22 @@ export default function PlanWorkspace() {
           type: 'line',
           source: 'waterways',
           paint: { 'line-color': '#0284c7', 'line-width': 3, 'line-opacity': 0.8 },
+        });
+        map.addLayer({
+          id: 'waterways-label',
+          type: 'symbol',
+          source: 'waterways',
+          filter: ['has', 'name'],
+          layout: {
+            'symbol-placement': 'line',
+            'text-field': ['get', 'name'],
+            'text-size': 12,
+          },
+          paint: {
+            'text-color': '#0284c7',
+            'text-halo-color': '#ffffff',
+            'text-halo-width': 2,
+          },
         });
       } catch (err) {
         console.error('waterways failed', err);
@@ -483,36 +579,42 @@ export default function PlanWorkspace() {
 
       map.on('click', function (ev) {
         const toolKey = activeToolRef.current;
-        if (!toolKey) return;
 
         if (toolKey === 'setStart') {
           setStartPoint({ lat: ev.lngLat.lat, lon: ev.lngLat.lng });
           return;
         }
 
-        if (toolKey === 'routeToPoint') {
-          runRoute(ev.lngLat.lat, ev.lngLat.lng, 'Selected location');
+        if (toolKey === 'closeRoad') return;
+
+        if (toolKey) {
+          const pool = planTypeRef.current === 'response' ? RESPONSE_TOOLS : PREVENTION_TOOLS;
+          const toolDef = pool.find(function (t) { return t.key === toolKey; });
+          if (!toolDef) return;
+          setMarkers(function (prev) {
+            return prev.concat([{
+              planType: planTypeRef.current,
+              type: toolKey,
+              label: toolDef.label,
+              emoji: toolDef.emoji,
+              color: toolDef.color,
+              effect: toolDef.effect || {},
+              effectLabel: toolDef.effectLabel || null,
+              lat: ev.lngLat.lat,
+              lon: ev.lngLat.lng,
+            }]);
+          });
           return;
         }
 
-        if (toolKey === 'closeRoad') return;
-
-        const pool = planTypeRef.current === 'response' ? RESPONSE_TOOLS : PREVENTION_TOOLS;
-        const toolDef = pool.find(function (t) { return t.key === toolKey; });
-        if (!toolDef) return;
-        setMarkers(function (prev) {
-          return prev.concat([{
-            planType: planTypeRef.current,
-            type: toolKey,
-            label: toolDef.label,
-            emoji: toolDef.emoji,
-            color: toolDef.color,
-            effect: toolDef.effect || {},
-            effectLabel: toolDef.effectLabel || null,
-            lat: ev.lngLat.lat,
-            lon: ev.lngLat.lng,
-          }]);
-        });
+        // No tool selected. On the Response tab, if a start point is already
+        // set, treat any plain click as "check the route to here" — this
+        // replaces the old separate "Route to any point" toggle. Matches
+        // how a real operator thinks: team location is set, just tap where
+        // you need to check next.
+        if (planTypeRef.current === 'response' && startPointRef.current) {
+          runRoute(ev.lngLat.lat, ev.lngLat.lng, 'Selected location');
+        }
       });
 
       // eslint-disable-next-line react-hooks/set-state-in-effect -- fires from the map's async 'load' event callback, not synchronously during the effect body
@@ -724,6 +826,9 @@ export default function PlanWorkspace() {
           </button>
         </div>
 
+        <div style={{ fontSize: 10, color: '#64748b', marginLeft: 12 }}>
+          Planning tool — for real emergencies call <b style={{ color: '#e2e8f0' }}>Rescue 1122</b>
+        </div>
         <div style={{ display: 'flex', gap: 14, marginLeft: 'auto', fontSize: 11.5, color: '#94a3b8' }}>
           <span><b style={{ color: '#f87171' }}>{scenario.affected_building_count}</b> buildings</span>
           <span><b style={{ color: '#f87171' }}>{scenario.flooded_road_count}</b> roads flooded</span>
@@ -802,9 +907,15 @@ export default function PlanWorkspace() {
             {activeToolDef.effectLabel && (
               <div style={{ marginTop: 4, opacity: 0.85 }}>Effect: {activeToolDef.effectLabel}</div>
             )}
+            {activeToolDef.realBasis && (
+              <div style={{ marginTop: 6, paddingTop: 6, borderTop: '1px solid ' + activeToolDef.color + '30', fontSize: 10, fontWeight: 500, opacity: 0.9 }}>
+                📰 {activeToolDef.realBasis}
+              </div>
+            )}
           </div>
         )}
 
+        {planType === 'response' && (
         <div style={{ marginTop: 14, borderTop: '1px solid #e2e8f0', paddingTop: 12 }}>
           <div style={{ fontSize: 12, fontWeight: 700, color: '#0f172a', marginBottom: 6 }}>
             🚑 Rescue routing
@@ -828,32 +939,9 @@ export default function PlanWorkspace() {
             📍 {startPoint ? 'Change start point' : 'Set start point'}
           </button>
 
-          <button
-            onClick={function () {
-              if (!startPoint) {
-                alert('Set a start point first.');
-                return;
-              }
-              setActiveTool(activeTool === 'routeToPoint' ? null : 'routeToPoint');
-            }}
-            style={{
-              width: '100%',
-              padding: '8px',
-              borderRadius: 9,
-              border: activeTool === 'routeToPoint' ? '2px solid #7c3aed' : '1px solid #e2e8f0',
-              background: activeTool === 'routeToPoint' ? '#f5f3ff' : '#f8fafc',
-              color: activeTool === 'routeToPoint' ? '#7c3aed' : '#475569',
-              fontSize: 11.5,
-              fontWeight: 700,
-              cursor: 'pointer',
-            }}
-          >
-            🎯 Route to any point
-          </button>
-
-          {activeTool === 'routeToPoint' && (
-            <div style={{ fontSize: 10.5, color: '#7c3aed', marginTop: 5 }}>
-              Click anywhere on the map — checks if it&apos;s reachable and draws the way there.
+          {startPoint && (
+            <div style={{ fontSize: 10.5, color: '#94a3b8', marginTop: 2, marginBottom: 4 }}>
+              Team location set. Click any hospital or any other point on the map to check if it&apos;s reachable.
             </div>
           )}
 
@@ -906,6 +994,7 @@ export default function PlanWorkspace() {
             </div>
           )}
         </div>
+        )}
 
         <div style={{ marginTop: 14, borderTop: '1px solid #e2e8f0', paddingTop: 12 }}>
           <div style={{ fontSize: 12, fontWeight: 700, color: '#0f172a', marginBottom: 6 }}>

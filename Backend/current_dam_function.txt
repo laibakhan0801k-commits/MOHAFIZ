@@ -1,0 +1,26 @@
+def dam_release_severity(release_intensity_pct: float) -> float:
+    """
+    HONEST NOTE: no large controlled dam currently sits directly
+    upstream of Nullah Leh — this cause type models a HYPOTHETICAL /
+    precautionary scenario (e.g. a future upstream retention structure,
+    the same idea explored in the Prevention Plan's "Retention pond"
+    measure). Real citable data doesn't exist for this specific
+    mechanism on this specific channel, so this threshold is a modeled
+    engineering assumption, not a sourced fact — flagged honestly
+    rather than dressed up as real data.
+
+    THRESHOLD_PCT=20%: standard controlled-release engineering practice
+    keeps small releases within safe channel capacity by design; only
+    releases past a real operational threshold cause overflow.
+    """
+    THRESHOLD_PCT = 20
+
+    if release_intensity_pct <= THRESHOLD_PCT:
+        return 0
+
+    return min(100, ((release_intensity_pct - THRESHOLD_PCT) / (100 - THRESHOLD_PCT)) * 100)
+
+
+# ---------------------------------------------------------------------
+# Core flood extent calculation — the "bathtub" itself
+# ---------------------------------------------------------------------

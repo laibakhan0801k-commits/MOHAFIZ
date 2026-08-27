@@ -170,6 +170,22 @@ export default function FloodMap() {
             'line-opacity': 0.9,
           },
         });
+        mapRef.current.addLayer({
+          id: 'waterways-label',
+          type: 'symbol',
+          source: 'waterways',
+          filter: ['has', 'name'],
+          layout: {
+            'symbol-placement': 'line',
+            'text-field': ['get', 'name'],
+            'text-size': 12,
+          },
+          paint: {
+            'text-color': '#0284c7',
+            'text-halo-color': '#ffffff',
+            'text-halo-width': 2,
+          },
+        });
 
         setStatus('loading buildings...');
         const buildings = await (await fetch('/data/buildings.geojson')).json();

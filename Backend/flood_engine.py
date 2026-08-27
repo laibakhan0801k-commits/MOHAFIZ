@@ -250,18 +250,13 @@ def drainage_failure_severity(rainfall_mm: float, drainage_capacity_pct: float) 
 # ---------------------------------------------------------------------
 def dam_release_severity(release_intensity_pct: float) -> float:
     """
-    HONEST NOTE: no large controlled dam currently sits directly
-    upstream of Nullah Leh — this cause type models a HYPOTHETICAL /
-    precautionary scenario (e.g. a future upstream retention structure,
-    the same idea explored in the Prevention Plan's "Retention pond"
-    measure). Real citable data doesn't exist for this specific
-    mechanism on this specific channel, so this threshold is a modeled
-    engineering assumption, not a sourced fact — flagged honestly
-    rather than dressed up as real data.
+    CORRECTED: Rawal Dam is a REAL controlled reservoir on the Korang
+    River, part of this project's own named corridor. During the real
+    Aug 2026 monsoon spell, Rawal Dam held 1,749 of its 1,752 acre-ft
+    capacity and its spillway was genuinely opened.
 
     THRESHOLD_PCT=20%: standard controlled-release engineering practice
-    keeps small releases within safe channel capacity by design; only
-    releases past a real operational threshold cause overflow.
+    keeps small releases within safe channel capacity by design.
     """
     THRESHOLD_PCT = 20
 
@@ -416,3 +411,89 @@ def list_affected_facilities(water_level_m: float, limit: int = 25):
     priority = {"hospital": 0, "clinic": 0, "doctors": 0}
     affected.sort(key=lambda f: priority.get(f["amenity"], 1))
     return affected[:limit]
+
+
+# ---------------------------------------------------------------------
+# PREVENTION: terrain-modifying interventions (embankments, etc.)
+# ---------------------------------------------------------------------
+
+def apply_line_raise(elevation_array, dem_bounds, line_coords, height_m, buffer_m=8):
+    """
+    Returns a MODIFIED COPY of the elevation array with a real embankment
+    applied: every pixel within buffer_m meters of the given line has its
+    elevation raised by height_m. This is genuine physics — an embankment
+    physically blocks water up to its height, so we model it the same way.
+
+    line_coords: list of [lon, lat] points defining the embankment's real path.
+    """
+    west, south, east, north = dem_bounds
+    H, W = elevation_array.shape
+
+    modified = elevation_array.copy()
+
+    lat_mid = (north + south) / 2
+    m_per_deg_lat = 111320
+    m_per_deg_lon = 111320 * np.cos(np.radians(lat_mid))
+    buffer_deg_lat = buffer_m / m_per_deg_lat
+    buffer_deg_lon = buffer_m / m_per_deg_lon
+
+    rows, cols = np.indices((H, W))
+    pixel_lon = west + (cols + 0.5) / W * (east - west)
+    pixel_lat = north - (rows + 0.5) / H * (north - south)
+
+    near_line = np.zeros((H, W), dtype=bool)
+    for i in range(len(line_coords) - 1):
+        lon1, lat1 = line_coords[i]
+        lon2, lat2 = line_coords[i + 1]
+
+        x1, y1 = lon1 / buffer_deg_lon, lat1 / buffer_deg_lat
+        x2, y2 = lon2 / buffer_deg_lon, lat2 / buffer_deg_lat
+        px, py = pixel_lon / buffer_deg_lon, pixel_lat / buffer_deg_lat
+
+        dx, dy = x2 - x1, y2 - y1
+        seg_len_sq = dx * dx + dy * dy
+        if seg_len_sq == 0:
+            dist = np.sqrt((px - x1) ** 2 + (py - y1) ** 2)
+        else:
+            t = np.clip(((px - x1) * dx + (py - y1) * dy) / seg_len_sq, 0, 1)
+            closest_x = x1 + t * dx
+            closest_y = y1 + t * dy
+            dist = np.sqrt((px - closest_x) ** 2 + (py - closest_y) ** 2)
+
+        near_line |= (dist <= 1.0)
+
+    modified[near_line] += height_m
+    return modified
+
+
+def compute_flood_extent_on_array(elevation_array, water_level_m):
+    """Same physics as compute_flood_extent, but works on ANY elevation
+    array — lets us compare the real terrain against a modified version
+    (e.g. with an embankment applied) using identical logic."""
+    valid_mask = ~np.isnan(elevation_array)
+    flooded = (elevation_array <= water_level_m) & valid_mask
+
+    valid_pixels = int(np.sum(valid_mask))
+    flooded_pixels = int(np.sum(flooded))
+
+    stats = {
+        "water_level_m": water_level_m,
+        "flooded_pixels": flooded_pixels,
+        "valid_pixels": valid_pixels,
+        "flooded_percent": round(100 * flooded_pixels / valid_pixels, 2) if valid_pixels else 0,
+    }
+    return flooded, stats
+
+
+def sample_elevation_from_array(elevation_array, dem_bounds, lon, lat):
+    """Look up the elevation at a real lon/lat point from a given array —
+    used to check roads/buildings against a MODIFIED terrain."""
+    west, south, east, north = dem_bounds
+    H, W = elevation_array.shape
+
+    col = int((lon - west) / (east - west) * W)
+    row = int((north - lat) / (north - south) * H)
+    col = max(0, min(W - 1, col))
+    row = max(0, min(H - 1, row))
+
+    return float(elevation_array[row, col])

@@ -82,3 +82,36 @@ def get_flooded_roads(water_level_m: float):
         "flooded_edges": flooded_edges,
         "clear_edges": clear_edges,
     }
+
+
+def get_flooded_roads_on_array(water_level_m, elevation_array, dem_bounds):
+    """
+    Same logic as get_flooded_roads, but checks each road intersection
+    against a MODIFIED elevation array instead of the real DEM file —
+    lets us count roads cut BEFORE vs AFTER a prevention measure.
+    """
+    import flood_engine
+
+    G = load_roads()
+    node_ids = list(G.nodes)
+
+    NODATA_FLOOR = -1000
+    node_flooded = {}
+    for node_id in node_ids:
+        lon = G.nodes[node_id]["x"]
+        lat = G.nodes[node_id]["y"]
+        elev = flood_engine.sample_elevation_from_array(elevation_array, dem_bounds, lon, lat)
+        node_flooded[node_id] = (elev > NODATA_FLOOR and elev <= water_level_m)
+
+    flooded_edge_count = 0
+    clear_edge_count = 0
+    for u, v in G.edges():
+        if node_flooded.get(u, False) or node_flooded.get(v, False):
+            flooded_edge_count += 1
+        else:
+            clear_edge_count += 1
+
+    return {
+        "flooded_edge_count": flooded_edge_count,
+        "clear_edge_count": clear_edge_count,
+    }
