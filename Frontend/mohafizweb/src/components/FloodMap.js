@@ -43,8 +43,19 @@ const CAUSES = [
     color: '#0EA5E9',
     colorLight: '#E0F2FE',
     fields: [
-      { key: 'intensity_mm_per_hr', label: 'Rain intensity', unit: 'mm/hr', min: 2, max: 150, step: 1 },
-      { key: 'duration_hr', label: 'Duration', unit: 'hours', min: 0.5, max: 8, step: 0.5 },
+      { key: 'intensity_mm_per_hr', label: 'Rain intensity', unit: 'mm/hr', min: 2, max: 200, step: 1,
+        helperText: function(v) {
+          if (v <= 10) return 'Low intensity — impact increases with duration';
+          if (v <= 50) return 'Moderate rainfall';
+          if (v <= 100) return 'Heavy rainfall';
+          return 'Extreme rainfall';
+        } },
+      { key: 'duration_hr', label: 'Duration', unit: 'hours', min: 1, max: 24, step: 0.5,
+        helperText: function(v) {
+          if (v <= 3) return 'Short burst';
+          if (v <= 8) return 'Sustained rainfall';
+          return 'Prolonged event';
+        } },
     ],
   },
   {
@@ -53,7 +64,12 @@ const CAUSES = [
     emoji: '🌊',
     color: '#06B6D4',
     colorLight: '#CFFAFE',
-    fields: [{ key: 'bank_rise_m', label: 'Bank rise', unit: 'meters', min: 0.1, max: 5, step: 0.1 }],
+    fields: [{ key: 'bank_rise_m', label: 'Overflow depth', unit: 'meters', min: 0.1, max: 5, step: 0.1,
+      helperText: function(v) {
+        if (v <= 0.5) return 'Water begins overtopping the river bank';
+        if (v <= 2) return 'Significant overflow';
+        return 'Major river flooding';
+      } }],
   },
   {
     key: 'drainage_failure',
@@ -62,8 +78,19 @@ const CAUSES = [
     color: '#F59E0B',
     colorLight: '#FEF3C7',
     fields: [
-      { key: 'rainfall_mm', label: 'Rainfall', unit: 'mm', min: 0, max: 150, step: 5 },
-      { key: 'drainage_capacity_pct', label: 'Drain capacity', unit: '%', min: 0, max: 100, step: 5 },
+      { key: 'rainfall_mm', label: 'Rainfall', unit: 'mm', min: 0, max: 150, step: 5,
+        helperText: function(v) {
+          if (v <= 20) return 'Light rainfall on compromised drains';
+          if (v <= 60) return 'Moderate rainfall adding to drain load';
+          return 'Heavy rainfall overwhelming drains';
+        } },
+      { key: 'drainage_capacity_pct', label: 'Drainage capacity lost', unit: '%', min: 20, max: 100, step: 5,
+        helperText: function(v) {
+          if (v <= 30) return 'Minor drainage capacity loss';
+          if (v <= 55) return 'Major drainage capacity loss';
+          if (v <= 80) return 'Severe drainage capacity loss';
+          return 'Complete drainage failure';
+        } },
     ],
   },
   {
@@ -72,7 +99,12 @@ const CAUSES = [
     emoji: '🚰',
     color: '#8B5CF6',
     colorLight: '#EDE9FE',
-    fields: [{ key: 'release_intensity_pct', label: 'Release intensity', unit: '%', min: 0, max: 100, step: 5 }],
+    fields: [{ key: 'release_intensity_pct', label: 'Release above normal', unit: '%', min: 10, max: 300, step: 5,
+      helperText: function(v) {
+        if (v <= 20) return v + '% above normal release';
+        if (v <= 100) return 'Significant surplus release';
+        return 'Emergency-level release';
+      } }],
   },
 ];
 
@@ -97,10 +129,10 @@ export default function FloodMap() {
 
   const [causeType, setCauseType] = useState('rainfall');
   const [causeParams, setCauseParams] = useState({
-    rainfall: { intensity_mm_per_hr: 50, duration_hr: 3 },
-    river_overflow: { bank_rise_m: 2.5 },
-    drainage_failure: { rainfall_mm: 60, drainage_capacity_pct: 30 },
-    dam_release: { release_intensity_pct: 70 },
+    rainfall: { intensity_mm_per_hr: 2, duration_hr: 1 },
+    river_overflow: { bank_rise_m: 0.1 },
+    drainage_failure: { rainfall_mm: 10, drainage_capacity_pct: 20 },
+    dam_release: { release_intensity_pct: 10 },
   });
   const [userId, setUserId] = useState('32c7d0c2-b311-45a3-b211-a60ef33abbfd');
   const [floodLoading, setFloodLoading] = useState(false);
@@ -168,6 +200,22 @@ export default function FloodMap() {
             'line-color': '#0284c7',
             'line-width': ['interpolate', ['linear'], ['zoom'], 12, 2, 18, 8],
             'line-opacity': 0.9,
+          },
+        });
+        mapRef.current.addLayer({
+          id: 'waterways-label',
+          type: 'symbol',
+          source: 'waterways',
+          filter: ['has', 'name'],
+          layout: {
+            'symbol-placement': 'line',
+            'text-field': ['get', 'name'],
+            'text-size': 12,
+          },
+          paint: {
+            'text-color': '#0284c7',
+            'text-halo-color': '#ffffff',
+            'text-halo-width': 2,
           },
         });
 
@@ -392,7 +440,9 @@ export default function FloodMap() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           cause_type: causeType,
-          params: causeParams[causeType],
+          params: causeType === 'drainage_failure'
+            ? { ...causeParams[causeType], drainage_capacity_pct: 100 - causeParams[causeType].drainage_capacity_pct }
+            : causeParams[causeType],
           user_id: userId,
         }),
       });
@@ -713,6 +763,11 @@ export default function FloodMap() {
                 onChange={(e) => updateParam(field.key, e.target.value)}
                 style={{ width: '100%', accentColor: activeCause.color, cursor: 'pointer' }}
               />
+              {field.helperText && (
+                <div style={{ fontSize: '11px', color: '#64748b', marginTop: '2px' }}>
+                  {field.helperText(causeParams[causeType][field.key])}
+                </div>
+              )}
             </div>
           ))}
         </div>
