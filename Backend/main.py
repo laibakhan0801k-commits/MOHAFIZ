@@ -192,6 +192,72 @@ def run_flood_scenario(request: FloodRequest, db: Session = Depends(get_db)):
         raise HTTPException(status_code=500, detail=str(type(e).__name__) + ": " + str(e) + " | " + traceback.format_exc()[-500:])
 
 
+class EmbankmentCompareRequest(BaseModel):
+    line_coords: list[list[float]]
+    height_m: float
+    water_level_m: float
+
+
+@app.post("/embankment-compare")
+def compare_embankment(request: EmbankmentCompareRequest):
+    """
+    Runs the real flood physics BEFORE and AFTER applying an embankment
+    to the terrain. Returns both sets of stats so the frontend can show
+    the real difference, not a fake percentage.
+    """
+    try:
+        elevation, valid = flood_engine.load_dem()
+        bounds = flood_engine.get_dem_bounds()
+
+        # BEFORE: real terrain, no intervention
+        before_mask, before_stats = flood_engine.compute_flood_extent_on_array(
+            elevation, request.water_level_m
+        )
+        before_roads = road_flooding.get_flooded_roads_on_array(
+            request.water_level_m, elevation, bounds
+        )
+
+        # Apply the embankment: raise terrain along the line by height_m
+        modified_elevation = flood_engine.apply_line_raise(
+            elevation, bounds, request.line_coords, request.height_m
+        )
+
+        # AFTER: same water level, modified terrain
+        after_mask, after_stats = flood_engine.compute_flood_extent_on_array(
+            modified_elevation, request.water_level_m
+        )
+        after_roads = road_flooding.get_flooded_roads_on_array(
+            request.water_level_m, modified_elevation, bounds
+        )
+
+        # Calculate the real difference
+        pixel_diff = before_stats['flooded_pixels'] - after_stats['flooded_pixels']
+        area_saved_m2 = pixel_diff * flood_engine.PIXEL_AREA_M2
+        roads_saved = before_roads['flooded_edge_count'] - after_roads['flooded_edge_count']
+
+        return {
+            "before": {
+                "flooded_percent": before_stats['flooded_percent'],
+                "flooded_pixels": before_stats['flooded_pixels'],
+                "roads_cut": before_roads['flooded_edge_count'],
+            },
+            "after": {
+                "flooded_percent": after_stats['flooded_percent'],
+                "flooded_pixels": after_stats['flooded_pixels'],
+                "roads_cut": after_roads['flooded_edge_count'],
+            },
+            "difference": {
+                "percent_change": round(before_stats['flooded_percent'] - after_stats['flooded_percent'], 3),
+                "pixels_saved": pixel_diff,
+                "area_saved_m2": round(area_saved_m2, 0),
+                "roads_saved": roads_saved,
+            },
+        }
+    except Exception as e:
+        import traceback
+        raise HTTPException(status_code=500, detail=str(type(e).__name__) + ": " + str(e) + " | " + traceback.format_exc()[-500:])
+
+
 @app.post("/route")
 def get_route(request: RouteRequest):
     try:

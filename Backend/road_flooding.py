@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """
 Checks which real road intersections/segments from roads.graphml
 go underwater at a given flood water level.

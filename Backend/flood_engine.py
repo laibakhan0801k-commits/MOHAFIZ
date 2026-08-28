@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """
 MOHAFIZ flood engine — bathtub-over-DEM model.
 

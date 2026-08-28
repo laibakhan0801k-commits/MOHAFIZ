@@ -68,7 +68,15 @@ embankment_line = [
 embankment_height_m = 2.5
 print(f"Embankment height: {embankment_height_m}m (margin was {margin:.2f}m, so this should be enough to clear it)")
 
-modified_elevation = apply_line_raise(elevation, bounds, embankment_line, embankment_height_m)
+# Diagnostic: check elevation at embankment endpoints
+from flood_engine import sample_elevation_from_array
+for i, (lon, lat) in enumerate(embankment_line):
+    elev = sample_elevation_from_array(elevation, bounds, lon, lat)
+    print(f"Embankment endpoint {i}: ({lon}, {lat}) elevation = {elev:.1f}m (water level = {water_level:.1f}m)")
+
+embankment_height_m = 5.0
+
+modified_elevation = apply_line_raise(elevation, bounds, embankment_line, embankment_height_m, buffer_m=15)
 
 touched = np.where(modified_elevation != elevation)
 print(f"\n[DIAGNOSTIC] Pixels raised: {len(touched[0])}")
