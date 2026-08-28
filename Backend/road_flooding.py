@@ -90,18 +90,20 @@ def get_flooded_roads_on_array(water_level_m, elevation_array, dem_bounds):
     against a MODIFIED elevation array instead of the real DEM file —
     lets us count roads cut BEFORE vs AFTER a prevention measure.
     """
+    import numpy as np
     import flood_engine
 
     G = load_roads()
     node_ids = list(G.nodes)
 
-    NODATA_FLOOR = -1000
+    # elevation_array is NaN-encoded nodata (see flood_engine.load_dem), not
+    # the raw -32768 sentinel, so we guard with isnan rather than a floor.
     node_flooded = {}
     for node_id in node_ids:
         lon = G.nodes[node_id]["x"]
         lat = G.nodes[node_id]["y"]
         elev = flood_engine.sample_elevation_from_array(elevation_array, dem_bounds, lon, lat)
-        node_flooded[node_id] = (elev > NODATA_FLOOR and elev <= water_level_m)
+        node_flooded[node_id] = (not np.isnan(elev) and elev <= water_level_m)
 
     flooded_edge_count = 0
     clear_edge_count = 0
