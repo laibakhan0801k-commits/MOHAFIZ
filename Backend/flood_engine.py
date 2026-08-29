@@ -498,3 +498,31 @@ def sample_elevation_from_array(elevation_array, dem_bounds, lon, lat):
     row = max(0, min(H - 1, row))
 
     return float(elevation_array[row, col])
+
+
+def compute_depth_grid(water_level_m: float):
+    """
+    Real per-cell water depth for a given water level.
+
+    Same bathtub physics as compute_flood_extent — this IS that flood
+    extent, just carrying depth instead of a boolean, so the frontend can
+    ask "how deep is the water at this exact point?" instead of only
+    "is this point wet?".
+
+    Returns (depth_array, meta). depth_array is metres of water above
+    terrain, 0.0 where dry, and np.nan where the DEM has no data.
+    """
+    elevation, _ = load_dem()
+    depth = water_level_m - elevation
+    depth = np.where(np.isnan(elevation), np.nan, np.maximum(0.0, depth))
+
+    west, south, east, north = get_dem_bounds()
+    height, width = depth.shape
+
+    meta = {
+        "water_level_m": water_level_m,
+        "width": width,
+        "height": height,
+        "bounds": [west, south, east, north],
+    }
+    return depth, meta

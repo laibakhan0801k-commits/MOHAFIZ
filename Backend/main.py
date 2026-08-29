@@ -7,6 +7,8 @@ import bcrypt
 from jose import jwt
 import os
 import json
+import math
+import numpy as np
 from dotenv import load_dotenv
 
 from database import SessionLocal, User, Scenario
@@ -50,6 +52,18 @@ class RouteRequest(BaseModel):
     end_lat: float
     end_lon: float
     water_level_m: float
+    # Roads the plan has closed by hand, as [u, v] graph node pairs taken
+    # straight from roads.geojson. Optional so older callers still work.
+    closed_edges: list[list[int]] | None = None
+
+
+class DiversionCheckRequest(BaseModel):
+    diversion_lat: float
+    diversion_lon: float
+    closure_u: int | None = None
+    closure_v: int | None = None
+    water_level_m: float
+    closed_edges: list[list[int]] | None = None
 
 @app.get("/")
 def read_root():
@@ -192,6 +206,27 @@ def run_flood_scenario(request: FloodRequest, db: Session = Depends(get_db)):
         raise HTTPException(status_code=500, detail=str(type(e).__name__) + ": " + str(e) + " | " + traceback.format_exc()[-500:])
 
 
+@app.post("/diversion-check")
+def diversion_check(request: DiversionCheckRequest):
+    """
+    Whether a traffic diversion point sits where it can actually work:
+    upstream of the closure it serves, and with a way round from there.
+    Answers on the real directed road network, so one-way streets count.
+    """
+    try:
+        return routing.check_diversion(
+            request.diversion_lat,
+            request.diversion_lon,
+            request.closure_u,
+            request.closure_v,
+            request.water_level_m,
+            routing.normalise_closures(request.closed_edges),
+        )
+    except Exception as e:
+        import traceback
+        raise HTTPException(status_code=500, detail=str(type(e).__name__) + ": " + str(e) + " | " + traceback.format_exc()[-500:])
+
+
 class EmbankmentCompareRequest(BaseModel):
     line_coords: list[list[float]]
     height_m: float
@@ -258,28 +293,111 @@ def compare_embankment(request: EmbankmentCompareRequest):
         raise HTTPException(status_code=500, detail=str(type(e).__name__) + ": " + str(e) + " | " + traceback.format_exc()[-500:])
 
 
+class FloodDepthGridRequest(BaseModel):
+    water_level_m: float
+
+
+@app.post("/flood-depth-grid")
+def flood_depth_grid(request: FloodDepthGridRequest):
+    """
+    Real per-cell water depth for the water level of a simulation that has
+    ALREADY been run. This is the same bathtub flood extent the map overlay
+    is drawn from, exposed as depth numbers so the response planner can ask
+    "how deep is the water at this exact point?" — needed because response
+    actions turn on real thresholds (a road under 5cm is still passable, one
+    under 60cm is not) that a boolean flooded/not-flooded mask cannot answer.
+
+    Depths are returned as whole CENTIMETRES to keep the payload small:
+      >= 0  water depth in cm at that cell
+      -1    DEM has no data for that cell
+    Row-major, `width` values per row, starting at the north-west corner.
+    """
+    try:
+        depth, meta = flood_engine.compute_depth_grid(request.water_level_m)
+
+        depth_cm = np.where(np.isnan(depth), -1, np.round(depth * 100))
+        meta["depth_cm"] = depth_cm.astype(np.int32).ravel().tolist()
+
+        # Real ground size of one cell, so the frontend can reason about how
+        # coarse this grid is instead of pretending it is point-accurate.
+        west, south, east, north = meta["bounds"]
+        lat_mid = (north + south) / 2
+        meta["cell_width_m"] = round((east - west) / meta["width"] * 111320 * math.cos(math.radians(lat_mid)), 1)
+        meta["cell_height_m"] = round((north - south) / meta["height"] * 111320, 1)
+
+        return meta
+    except Exception as e:
+        import traceback
+        raise HTTPException(status_code=500, detail=str(type(e).__name__) + ": " + str(e) + " | " + traceback.format_exc()[-500:])
+
+
 @app.post("/route")
 def get_route(request: RouteRequest):
     try:
         direct = routing.find_route(request.start_lat, request.start_lon, request.end_lat, request.end_lon)
-        crosses = routing.route_crosses_flood(direct, request.water_level_m)
 
-        if crosses:
+        # No road connection at all, flooding aside. Answered explicitly so
+        # the caller can say WHY it is unreachable instead of guessing.
+        if not direct.get("reachable", True):
+            return {
+                "direct_route": [],
+                "direct_length_m": 0,
+                "crosses_flood": False,
+                "reachable": False,
+                "safe_route": None,
+                "safe_length_m": None,
+                "unreachable_reason": "no_road_connection",
+                "water_level_m": request.water_level_m,
+            }
+
+        closed_pairs = routing.normalise_closures(request.closed_edges)
+
+        crosses = routing.route_crosses_flood(direct, request.water_level_m)
+        hits_closure = routing.route_crosses_closures(direct, closed_pairs)
+
+        # The DIRECT route stays the untouched baseline — it shows what you
+        # would drive if neither the flood nor the closures existed. Only the
+        # safe route routes around them.
+        if crosses or hits_closure:
             safe = routing.find_flood_safe_route(
                 request.start_lat, request.start_lon,
                 request.end_lat, request.end_lon,
-                request.water_level_m
+                request.water_level_m,
+                closed_pairs,
             )
         else:
             safe = direct
+
+        reachable = safe.get("reachable", True)
+
+        # Self-check: the returned safe route must not traverse a closed
+        # edge. Answered on the node path, which is the only thing that
+        # actually settles it.
+        safe_hits_closure = reachable and routing.route_crosses_closures(safe, closed_pairs)
+
+        if reachable:
+            unreachable_reason = None
+        elif closed_pairs and not crosses:
+            unreachable_reason = "cut_off_by_closures"
+        elif closed_pairs:
+            unreachable_reason = "cut_off_by_flood_and_closures"
+        else:
+            unreachable_reason = "cut_off_by_flood"
 
         return {
             "direct_route": direct["coords"],
             "direct_length_m": direct["length_m"],
             "crosses_flood": crosses,
-            "reachable": safe.get("reachable", True),
-            "safe_route": safe["coords"] if safe.get("reachable") else None,
-            "safe_length_m": safe.get("length_m") if safe.get("reachable") else None,
+            "crosses_closures": hits_closure,
+            "safe_crosses_closures": safe_hits_closure,
+            "closures_applied": len(closed_pairs) // 2,
+            "reachable": reachable,
+            "safe_route": safe["coords"] if reachable else None,
+            "safe_length_m": safe.get("length_m") if reachable else None,
+            "unreachable_reason": unreachable_reason,
+            # Echoed back so the frontend can prove a drawn route belongs to
+            # the water level it is currently displaying.
+            "water_level_m": request.water_level_m,
         }
     except Exception as e:
         import traceback
