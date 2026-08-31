@@ -1,4 +1,4 @@
-﻿from fastapi import FastAPI, HTTPException, Depends
+from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, EmailStr
 from sqlalchemy.orm import Session
@@ -111,7 +111,9 @@ FRAME_COUNT = 6
 def run_flood_scenario(request: FloodRequest, db: Session = Depends(get_db)):
     try:
         if request.cause_type == "rainfall":
-            severity = flood_engine.rainfall_severity(**request.params)
+            # Rainfall is selected as a PMD 24-hour accumulation band, not as
+            # an intensity/duration pair. The band IS the severity input.
+            severity = flood_engine.rainfall_band_severity(request.params.get("band"))
         elif request.cause_type == "river_overflow":
             severity = flood_engine.river_overflow_severity(**request.params)
         elif request.cause_type == "drainage_failure":
@@ -125,7 +127,7 @@ def run_flood_scenario(request: FloodRequest, db: Session = Depends(get_db)):
         # the volume-conserving model. River overflow and dam release describe
         # a water LEVEL directly, so they keep the percentile mapping.
         if request.cause_type == "rainfall":
-            raw_rain_mm = request.params["intensity_mm_per_hr"] * request.params["duration_hr"]
+            raw_rain_mm = flood_engine.rainfall_band_plan_mm(request.params.get("band"))
             use_volume_model = True
         elif request.cause_type == "drainage_failure":
             raw_rain_mm = 4 + request.params["rainfall_mm"]
@@ -180,9 +182,22 @@ def run_flood_scenario(request: FloodRequest, db: Session = Depends(get_db)):
         db.commit()
         db.refresh(scenario)
 
+        rainfall_band_info = None
+        if request.cause_type == "rainfall":
+            band_key = request.params.get("band")
+            record = flood_engine.rainfall_band(band_key)
+            rainfall_band_info = {
+                "band": band_key,
+                "label": record["label"],
+                "range_label": record["range_label"],
+                "plan_mm": record["plan_mm"],
+                "order": record["order"],
+            }
+
         return {
             "scenario_id": scenario.id,
             "cause_type": request.cause_type,
+            "rainfall_band": rainfall_band_info,
             "severity": round(severity, 1),
             "water_level_m": water_level_m,
             "avg_depth_m": flood_engine.compute_depth_stats(water_level_m)["avg_depth_m"],
