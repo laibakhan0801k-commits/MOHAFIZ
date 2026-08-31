@@ -29,7 +29,7 @@ const TARGET_VIEW = {
   bearing: -20,
 };
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000';
+const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8002';
 
 // Bright magenta — deliberately unlike greenery (green), water (blue),
 // hospitals (red) or flood (red-orange), so the study boundary never blends in.
@@ -138,6 +138,7 @@ export default function FloodMap() {
   const [floodLoading, setFloodLoading] = useState(false);
   const [floodError, setFloodError] = useState(null);
   const [floodResult, setFloodResult] = useState(null);
+  const sentParamsRef = useRef(null);
 
   useEffect(() => {
     if (mapRef.current) return;
@@ -435,19 +436,32 @@ export default function FloodMap() {
     setFloodLoading(true);
     setFloodError(null);
     try {
+      const currentCause = CAUSES.find(function (c) { return c.key === causeType; });
+      const clampedParams = Object.assign({}, causeParams[causeType]);
+      if (currentCause) {
+        currentCause.fields.forEach(function (f) {
+          var v = clampedParams[f.key];
+          if (typeof v === 'number') {
+            if (f.min !== undefined && v < f.min) clampedParams[f.key] = f.min;
+            if (f.max !== undefined && v > f.max) clampedParams[f.key] = f.max;
+          }
+        });
+      }
+      const sentParams = causeType === 'drainage_failure'
+        ? { ...clampedParams, drainage_capacity_pct: 100 - clampedParams.drainage_capacity_pct }
+        : clampedParams;
       const res = await fetch(`${API_URL}/flood`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           cause_type: causeType,
-          params: causeType === 'drainage_failure'
-            ? { ...causeParams[causeType], drainage_capacity_pct: 100 - causeParams[causeType].drainage_capacity_pct }
-            : causeParams[causeType],
+          params: sentParams,
           user_id: userId,
         }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.detail || 'Something went wrong.');
+      sentParamsRef.current = { cause_type: causeType, params: sentParams };
       setFloodResult(data);
       await animateFlood(data);
     } catch (err) {
@@ -854,7 +868,9 @@ export default function FloodMap() {
         {floodResult && floodResult.severity > 0 && (
           <button
             onClick={() => {
-              sessionStorage.setItem('mohafiz_scenario', JSON.stringify(floodResult));
+              sessionStorage.setItem('mohafiz_scenario', JSON.stringify(
+                Object.assign({}, floodResult, sentParamsRef.current ? { params: sentParamsRef.current } : {})
+              ));
               router.push('/plan');
             }}
             style={{
