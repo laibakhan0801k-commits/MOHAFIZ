@@ -271,24 +271,31 @@ def compare_embankment(request: EmbankmentCompareRequest):
             request.water_level_m, modified_elevation, bounds
         )
 
-        # Calculate the real difference
-        pixel_diff = before_stats['flooded_pixels'] - after_stats['flooded_pixels']
+        before_out = {
+            "flooded_percent": before_stats['flooded_percent'],
+            "flooded_pixels": before_stats['flooded_pixels'],
+            "roads_cut": before_roads['flooded_edge_count'],
+        }
+        after_out = {
+            "flooded_percent": after_stats['flooded_percent'],
+            "flooded_pixels": after_stats['flooded_pixels'],
+            "roads_cut": after_roads['flooded_edge_count'],
+        }
+        # Same hard invariant as the main prevention simulation — see
+        # _clamp_after_stats. An embankment only ever raises terrain, so
+        # this should never fire, but it shares the one clamp function
+        # rather than duplicating (unpatched) safety logic per endpoint.
+        _clamp_after_stats(before_out, after_out)
+
+        pixel_diff = max(0, before_out['flooded_pixels'] - after_out['flooded_pixels'])
+        roads_saved = max(0, before_out['roads_cut'] - after_out['roads_cut'])
         area_saved_m2 = pixel_diff * flood_engine.PIXEL_AREA_M2
-        roads_saved = before_roads['flooded_edge_count'] - after_roads['flooded_edge_count']
 
         return {
-            "before": {
-                "flooded_percent": before_stats['flooded_percent'],
-                "flooded_pixels": before_stats['flooded_pixels'],
-                "roads_cut": before_roads['flooded_edge_count'],
-            },
-            "after": {
-                "flooded_percent": after_stats['flooded_percent'],
-                "flooded_pixels": after_stats['flooded_pixels'],
-                "roads_cut": after_roads['flooded_edge_count'],
-            },
+            "before": before_out,
+            "after": after_out,
             "difference": {
-                "percent_change": round(before_stats['flooded_percent'] - after_stats['flooded_percent'], 3),
+                "percent_change": max(0.0, round(before_out['flooded_percent'] - after_out['flooded_percent'], 3)),
                 "pixels_saved": pixel_diff,
                 "area_saved_m2": round(area_saved_m2, 0),
                 "roads_saved": roads_saved,
@@ -429,6 +436,37 @@ def _build_terrain_args(actions):
     return embankments, ponds, widen_actions, encroachments, capacity_actions
 
 
+_CLAMPED_METRICS = ("flooded_percent", "flooded_pixels", "roads_cut", "buildings_affected", "avg_depth_m", "max_depth_m")
+
+
+def _clamp_after_stats(before_stats, after_stats):
+    """
+    Hard invariant, applied at the data layer everywhere a before/after
+    flood comparison is returned (prevention simulate/breakdown AND the
+    embankment sidebar preview) — a plan must never look like it made
+    things worse than doing nothing. Structural volume reduction, capacity
+    gain and local protection are all non-negative by construction, so
+    this should never actually trigger — but if a future change or a
+    floating-point edge case ever pushes an "after" metric above its
+    "before" baseline, clamp it back to the baseline (zero improvement,
+    not a negative one) and log it loudly instead of silently showing a
+    misleading regression to the user.
+
+    Only clamps keys present in BOTH dicts, so the same helper works for
+    the full prevention-sim stats and the smaller embankment-compare
+    stats without needing two copies of this logic.
+    """
+    for key in _CLAMPED_METRICS:
+        if key not in before_stats or key not in after_stats:
+            continue
+        if after_stats[key] > before_stats[key]:
+            print(f"WARNING: flood-comparison after.{key}={after_stats[key]} exceeded "
+                  f"before.{key}={before_stats[key]} — clamping to baseline. "
+                  f"This should not happen; investigate the physics if it does.")
+            after_stats[key] = before_stats[key]
+    return after_stats
+
+
 def _run_prevention_sim(cause_type, params, actions, elevation, bounds, direct_water_level_m=None):
     """Core simulation: returns (before_stats, after_stats, images, capacity_meta).
     Shared by /prevention/simulate and /prevention/breakdown.
@@ -442,17 +480,34 @@ def _run_prevention_sim(cause_type, params, actions, elevation, bounds, direct_w
         ponds, widen_actions, encroachments, cause_type=cause_type
     )
 
+    # Level-driven causes (river overflow / dam release) don't have a real
+    # rainfall volume this DEM can "own" — the water is arriving from far
+    # upstream, so a single pond or widened channel section genuinely
+    # cannot lower the WHOLE river's flood stage. Diluting its intercepted
+    # volume across the entire study area (as volume-based causes correctly
+    # do) made every structural action look like it did nothing — a few
+    # thousand m3 against a basin holding millions is a rounding error.
+    # What a local measure CAN honestly do is protect its own immediate
+    # surroundings, so for these causes we keep the basin-wide water level
+    # unchanged and apply the intercepted volume as a local protection zone
+    # instead (flood_engine.apply_local_protection).
+    level_driven = cause_type in ("river_overflow", "dam_release")
+
     if direct_water_level_m is not None:
         wl_before = direct_water_level_m
         capacity_meta = flood_engine.compute_capacity_gain(capacity_actions, cause_type=cause_type)
-        # Derive the before-volume from the water level, subtract structural
-        # reduction, then find the new equilibrium water level.
-        vol_before = flood_engine.volume_stored_below(wl_before)
-        vol_after = max(0.0, vol_before - structural_vol_m3)
         if capacity_meta["applies_to_cause"]:
+            # Volume-based causes: structural interception competes with the
+            # same catchment-wide runoff volume the water level came from —
+            # solving for a new basin-wide equilibrium level is the honest
+            # model here.
+            vol_before = flood_engine.volume_stored_below(wl_before)
+            vol_after = max(0.0, vol_before - structural_vol_m3)
             rc_after = capacity_meta["runoff_coefficient_after"]
             vol_after = vol_after * (rc_after / 0.6)
-        wl_after = flood_engine.water_level_from_volume(vol_after) if vol_after > 0 else float(elevation.min()) - 1.0
+            wl_after = flood_engine.water_level_from_volume(vol_after) if vol_after > 0 else float(elevation.min()) - 1.0
+        else:
+            wl_after = wl_before
         severity_before = 1 if wl_before > float(elevation.min()) else 0
         severity_after = 1 if wl_after > float(elevation.min()) else 0
     else:
@@ -463,31 +518,21 @@ def _run_prevention_sim(cause_type, params, actions, elevation, bounds, direct_w
         capacity_meta = flood_engine.compute_capacity_gain(capacity_actions, cause_type=cause_type)
         if capacity_meta["applies_to_cause"]:
             rc_after = capacity_meta["runoff_coefficient_after"]
-        else:
-            rc_after = 0.6
-        # Subtract structural volume from the before-volume, then scale by
-        # runoff coefficient change from capacity actions.
-        vol_before = flood_engine.volume_stored_below(wl_before)
-        vol_after = max(0.0, vol_before - structural_vol_m3) * (rc_after / 0.6)
-        try:
-            if vol_after <= 0:
-                severity_after = 0
-                wl_after = float(flood_engine.load_dem()[1].min()) - 1.0
-            elif cause_type in ("rainfall", "drainage_failure"):
-                wl_after = flood_engine.water_level_from_volume(vol_after)
-                severity_after = severity_before
-            else:
-                # river_overflow / dam_release: use severity path but apply
-                # structural volume reduction as a proportional water-level drop.
-                severity_after, wl_after_unmitigated = _resolve_water_level(cause_type, params, rc_after)
-                vol_unmitigated = flood_engine.volume_stored_below(wl_after_unmitigated)
-                vol_mitigated = max(0.0, vol_unmitigated - structural_vol_m3)
-                if vol_mitigated <= 0:
+            # Subtract structural volume from the before-volume, then scale by
+            # runoff coefficient change from capacity actions.
+            vol_before = flood_engine.volume_stored_below(wl_before)
+            vol_after = max(0.0, vol_before - structural_vol_m3) * (rc_after / 0.6)
+            try:
+                if vol_after <= 0:
+                    severity_after = 0
                     wl_after = float(flood_engine.load_dem()[1].min()) - 1.0
                 else:
-                    wl_after = flood_engine.water_level_from_volume(vol_mitigated)
-        except (TypeError, KeyError):
-            severity_after, wl_after = 1, flood_engine.severity_to_water_level(50)
+                    wl_after = flood_engine.water_level_from_volume(vol_after)
+                    severity_after = severity_before
+            except (TypeError, KeyError):
+                severity_after, wl_after = 1, flood_engine.severity_to_water_level(50)
+        else:
+            severity_after, wl_after = severity_before, wl_before
 
     before_mask, before_flood = flood_engine.compute_flood_extent_on_array(elevation, wl_before)
     before_roads = road_flooding.get_flooded_roads_on_array(wl_before, elevation, bounds)
@@ -497,14 +542,29 @@ def _run_prevention_sim(cause_type, params, actions, elevation, bounds, direct_w
     modified, terrain_meta = flood_engine.apply_all_terrain_actions(
         elevation, bounds, embankments, ponds, widen_actions, encroachments
     )
+    # Raw numpy array — used internally below, must not leak into the
+    # JSON response (terrain_meta is returned as-is to the frontend).
+    engineered_mask = terrain_meta.pop('engineered_mask')
 
-    after_mask, after_flood = flood_engine.compute_flood_extent_on_array(modified, wl_after)
-    after_roads = road_flooding.get_flooded_roads_on_array(wl_after, modified, bounds)
-    after_buildings = flood_engine.count_affected_buildings_on_array(modified, bounds, wl_after)
-    after_depth = flood_engine.compute_depth_stats_on_array(modified, wl_after)
+    local_protection_m3 = 0.0
+    if level_driven:
+        protection = flood_engine.apply_local_protection(elevation, bounds, ponds, widen_actions, encroachments)
+        if protection.any():
+            modified = modified + protection
+            local_protection_m3 = structural_vol_m3
+
+    # A pond/widened channel/restored-channel footprint holds water BY
+    # DESIGN — that's the measure working, not storm damage. Excluded here
+    # so digging one doesn't make the plan look like it flooded more area.
+    after_calc = flood_engine.exclude_engineered_footprint(modified, engineered_mask)
+
+    after_mask, after_flood = flood_engine.compute_flood_extent_on_array(after_calc, wl_after)
+    after_roads = road_flooding.get_flooded_roads_on_array(wl_after, after_calc, bounds)
+    after_buildings = flood_engine.count_affected_buildings_on_array(after_calc, bounds, wl_after)
+    after_depth = flood_engine.compute_depth_stats_on_array(after_calc, wl_after)
 
     before_img = flood_engine.render_flood_png_base64(before_mask)
-    after_img = flood_engine.render_flood_png_base64(after_mask)
+    after_img = flood_engine.render_flood_comparison_png_base64(before_mask, after_mask)
 
     before_stats = {
         "flooded_percent": before_flood["flooded_percent"],
@@ -514,6 +574,14 @@ def _run_prevention_sim(cause_type, params, actions, elevation, bounds, direct_w
         "avg_depth_m": before_depth["avg_depth_m"],
         "max_depth_m": before_depth["max_depth_m"],
         "water_level_m": round(wl_before, 2),
+        # Real bounding box of the flooded area (not the whole DEM) — lets
+        # the frontend frame the before/after thumbnails around the actual
+        # flood shape instead of zooming to wherever the actions happen to
+        # sit, which can crop into one uniformly-flooded patch and look
+        # like a solid color block. after_mask is always a subset of
+        # before_mask (see _clamp_after_stats), so before's bbox already
+        # covers both.
+        "flooded_bbox": flood_engine.get_flooded_bbox(before_mask),
     }
     after_stats = {
         "flooded_percent": after_flood["flooded_percent"],
@@ -522,10 +590,18 @@ def _run_prevention_sim(cause_type, params, actions, elevation, bounds, direct_w
         "buildings_affected": after_buildings,
         "avg_depth_m": after_depth["avg_depth_m"],
         "max_depth_m": after_depth["max_depth_m"],
+    }
+    _clamp_after_stats(before_stats, after_stats)
+
+    pixels_saved = max(0, before_stats["flooded_pixels"] - after_stats["flooded_pixels"])
+    after_stats.update({
         "water_level_m": round(wl_after, 2),
         "water_level_saved_m": round(max(0.0, wl_before - wl_after), 3),
         "volume_stored_m3": round(structural_vol_m3, 0),
-    }
+        "locally_protected_m3": round(local_protection_m3, 0),
+        "pixels_saved": pixels_saved,
+        "area_saved_m2": round(pixels_saved * flood_engine.PIXEL_AREA_M2, 0),
+    })
 
     return before_stats, after_stats, before_img, after_img, capacity_meta, terrain_meta, structural_vol_m3
 
@@ -545,9 +621,10 @@ def prevention_simulate(request: PreventionSimulateRequest):
             direct_water_level_m=request.water_level_m
         )
 
-        delta_pct = round(before["flooded_percent"] - after["flooded_percent"], 2)
-        roads_saved = before["roads_cut"] - after["roads_cut"]
-        buildings_saved = before["buildings_affected"] - after["buildings_affected"]
+        # Never show a plan as making things worse — see _clamp_after_stats.
+        delta_pct = max(0.0, round(before["flooded_percent"] - after["flooded_percent"], 2))
+        roads_saved = max(0, before["roads_cut"] - after["roads_cut"])
+        buildings_saved = max(0, before["buildings_affected"] - after["buildings_affected"])
 
         return {
             "before": before,
@@ -558,6 +635,9 @@ def prevention_simulate(request: PreventionSimulateRequest):
                 "buildings_saved": buildings_saved,
                 "water_level_saved_m": after["water_level_saved_m"],
                 "volume_stored_m3": after["volume_stored_m3"],
+                "locally_protected_m3": after["locally_protected_m3"],
+                "pixels_saved": after["pixels_saved"],
+                "area_saved_m2": after["area_saved_m2"],
             },
             "flood_image_before": before_img,
             "flood_image_after": after_img,
@@ -604,9 +684,10 @@ def prevention_breakdown(request: PreventionSimulateRequest):
             direct_water_level_m=request.water_level_m
         )
 
-        total_delta_pct = full_before["flooded_percent"] - full_after["flooded_percent"]
-        total_roads_saved = full_before["roads_cut"] - full_after["roads_cut"]
-        total_buildings_saved = full_before["buildings_affected"] - full_after["buildings_affected"]
+        # Never show the combined plan as making things worse — see _clamp_after_stats.
+        total_delta_pct = max(0.0, full_before["flooded_percent"] - full_after["flooded_percent"])
+        total_roads_saved = max(0, full_before["roads_cut"] - full_after["roads_cut"])
+        total_buildings_saved = max(0, full_before["buildings_affected"] - full_after["buildings_affected"])
 
         breakdown = []
         sum_delta_pct = 0.0
@@ -626,6 +707,7 @@ def prevention_breakdown(request: PreventionSimulateRequest):
             delta_pct = without_after["flooded_percent"] - full_after["flooded_percent"]
             roads_saved = without_after["roads_cut"] - full_after["roads_cut"]
             buildings_saved = without_after["buildings_affected"] - full_after["buildings_affected"]
+            pixels_saved = max(0, without_after["flooded_pixels"] - full_after["flooded_pixels"])
             sum_delta_pct += delta_pct
             sum_roads_saved += roads_saved
             sum_buildings_saved += buildings_saved
@@ -646,7 +728,7 @@ def prevention_breakdown(request: PreventionSimulateRequest):
                 delta_pct = 0
                 roads_saved = 0
                 buildings_saved = 0
-                note = "Early warning gauges save lives but don't reduce flood extent."
+                note = "Flood alert sensors save lives but don't reduce flood extent."
             elif atype in ("desilt", "clearDrains", "greenBuffer"):
                 if not full_capacity.get("applies_to_cause"):
                     note = "Capacity actions have no modelled effect for " + request.cause_type + " scenarios."
@@ -662,6 +744,9 @@ def prevention_breakdown(request: PreventionSimulateRequest):
                 "note": note,
                 "volume_stored_m3": round(single_vol, 0),
                 "water_level_saved_m": round(single_after["water_level_saved_m"], 3),
+                "locally_protected_m3": single_after["locally_protected_m3"],
+                "pixels_saved": pixels_saved,
+                "area_saved_m2": round(pixels_saved * flood_engine.PIXEL_AREA_M2, 0),
             })
 
         interaction_note = None
@@ -679,6 +764,9 @@ def prevention_breakdown(request: PreventionSimulateRequest):
                 "buildings_saved": total_buildings_saved,
                 "water_level_saved_m": full_after["water_level_saved_m"],
                 "volume_stored_m3": full_after["volume_stored_m3"],
+                "locally_protected_m3": full_after["locally_protected_m3"],
+                "pixels_saved": full_after["pixels_saved"],
+                "area_saved_m2": full_after["area_saved_m2"],
             },
             "sum_of_marginals": {
                 "flooded_percent_change": round(sum_delta_pct, 3),

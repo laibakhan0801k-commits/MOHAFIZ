@@ -1,6 +1,7 @@
 ﻿"use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
 import { Space_Grotesk } from "next/font/google";
 
 const display = Space_Grotesk({
@@ -11,12 +12,19 @@ const display = Space_Grotesk({
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
 
 export default function Home() {
+  const router = useRouter();
   const [mode, setMode] = useState("login");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [status, setStatus] = useState("idle");
   const [message, setMessage] = useState("");
   const [token, setToken] = useState(null);
+
+  useEffect(() => {
+    if (localStorage.getItem("mohafiz_token")) {
+      router.replace("/map");
+    }
+  }, [router]);
 
   async function handleSubmit(e) {
     e.preventDefault();
@@ -39,7 +47,13 @@ export default function Home() {
       if (mode === "login") {
         setToken(data.access_token);
         setStatus("success");
-        setMessage("Logged in.");
+        setMessage("Logged in. Redirecting...");
+        localStorage.setItem("mohafiz_token", data.access_token);
+        localStorage.setItem(
+          "mohafiz_user",
+          JSON.stringify({ id: data.user_id, email: data.email })
+        );
+        router.push("/map");
       } else {
         setStatus("success");
         setMessage("Account created — you can log in now.");

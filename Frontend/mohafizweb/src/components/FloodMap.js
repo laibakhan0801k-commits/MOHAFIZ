@@ -134,11 +134,31 @@ export default function FloodMap() {
     drainage_failure: { rainfall_mm: 10, drainage_capacity_pct: 20 },
     dam_release: { release_intensity_pct: 10 },
   });
-  const [userId, setUserId] = useState('32c7d0c2-b311-45a3-b211-a60ef33abbfd');
+  const [user, setUser] = useState(null);
   const [floodLoading, setFloodLoading] = useState(false);
   const [floodError, setFloodError] = useState(null);
   const [floodResult, setFloodResult] = useState(null);
   const sentParamsRef = useRef(null);
+
+  useEffect(() => {
+    const token = localStorage.getItem('mohafiz_token');
+    if (!token) {
+      router.replace('/');
+      return;
+    }
+    try {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- one-time read of browser storage on mount
+      setUser(JSON.parse(localStorage.getItem('mohafiz_user')));
+    } catch {
+      setUser(null);
+    }
+  }, [router]);
+
+  function handleLogout() {
+    localStorage.removeItem('mohafiz_token');
+    localStorage.removeItem('mohafiz_user');
+    router.replace('/');
+  }
 
   useEffect(() => {
     if (mapRef.current) return;
@@ -433,6 +453,10 @@ export default function FloodMap() {
   }
 
   async function runFloodScenario() {
+    if (!user?.id) {
+      setFloodError('You must be logged in to run a simulation.');
+      return;
+    }
     setFloodLoading(true);
     setFloodError(null);
     try {
@@ -456,7 +480,7 @@ export default function FloodMap() {
         body: JSON.stringify({
           cause_type: causeType,
           params: sentParams,
-          user_id: userId,
+          user_id: user?.id,
         }),
       });
       const data = await res.json();
@@ -890,19 +914,32 @@ export default function FloodMap() {
             🗺️ Open Response Plan →
           </button>
         )}
-        <div style={{ marginTop: '12px', fontSize: '10px', color: '#94a3b8' }}>
-          running as test account —{' '}
-          <input
-            value={userId}
-            onChange={(e) => setUserId(e.target.value)}
+        <div
+          style={{
+            marginTop: '12px',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            fontSize: '10px',
+            color: '#94a3b8',
+          }}
+        >
+          <span>{user?.email ? `signed in as ${user.email}` : 'not signed in'}</span>
+          <button
+            onClick={handleLogout}
             style={{
               border: '1px solid #e2e8f0',
               borderRadius: '6px',
-              padding: '2px 6px',
+              padding: '3px 8px',
               fontSize: '10px',
-              width: '140px',
+              fontWeight: 600,
+              color: '#64748b',
+              background: 'transparent',
+              cursor: 'pointer',
             }}
-          />
+          >
+            Log out
+          </button>
         </div>
       </div>
 

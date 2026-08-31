@@ -307,6 +307,29 @@ def render_flood_png_base64(flooded_mask):
     encoded = base64.b64encode(buffer.getvalue()).decode("utf-8")
     return f"data:image/png;base64,{encoded}"
 
+
+def render_flood_comparison_png_base64(before_mask, after_mask):
+    """
+    The "after" picture for a prevention comparison: still-flooded ground
+    stays the same blue as the before image, but ground that WAS flooded
+    and no longer is gets highlighted green — the real, visible area a
+    plan's actions protected, not just a slightly-smaller blue blob.
+    """
+    height, width = before_mask.shape
+    rgba = np.zeros((height, width, 4), dtype=np.uint8)
+
+    saved = before_mask & ~after_mask
+    still_flooded = after_mask
+
+    rgba[still_flooded] = [37, 99, 235, 170]   # blue — still flooded
+    rgba[saved] = [16, 185, 129, 210]          # green — protected by the plan
+
+    img = Image.fromarray(rgba, mode="RGBA")
+    buffer = io.BytesIO()
+    img.save(buffer, format="PNG")
+    encoded = base64.b64encode(buffer.getvalue()).decode("utf-8")
+    return f"data:image/png;base64,{encoded}"
+
 def get_flooded_bbox(flooded_mask, min_span_deg=0.01):
     """
     Returns [west, south, east, north] — the tight bounding box around
@@ -465,6 +488,28 @@ def apply_line_raise(elevation_array, dem_bounds, line_coords, height_m, buffer_
 
     modified[near_line] += height_m
     return modified
+
+
+def exclude_engineered_footprint(elevation_array, engineered_mask):
+    """
+    A retention pond, a widened/deepened channel, or a restored channel
+    where an encroachment stood is DESIGNED to hold water — that water is
+    the measure working as intended, not flood damage. Without this, the
+    "after" flood extent counts the pond's own water as newly flooded
+    ground, making every structural intervention look like it makes
+    things worse (more roads cut, more area flooded) purely from its own
+    footprint.
+
+    Returns a COPY with engineered cells pushed safely above any real
+    water level, so flood-extent / road / building / depth calculations
+    correctly exclude them from the damage count.
+    """
+    if not engineered_mask.any():
+        return elevation_array
+    out = elevation_array.copy()
+    ceiling = float(np.nanmax(elevation_array)) + 1000.0
+    out[engineered_mask] = ceiling
+    return out
 
 
 def compute_flood_extent_on_array(elevation_array, water_level_m):
@@ -696,6 +741,10 @@ def apply_all_terrain_actions(elevation, dem_bounds, embankments, ponds,
         'pixels_raised': int(np.sum(raise_delta > 0)),
         'pixels_lowered': int(np.sum(lower_delta > 0)),
         'subpixel_actions': subpixel_actions,
+        # Cells deliberately dug for engineered water storage (ponds, a
+        # widened/deepened channel, a restored channel where an
+        # encroachment stood) — see note on engineered_mask below.
+        'engineered_mask': lower_delta > 0,
     }
     return modified, meta
 
@@ -938,74 +987,178 @@ def compute_capacity_gain(capacity_actions, waterways_geojson=None,
     }
 
 
+# Islamabad nullah tributaries (Lai Nadi, smaller nullahs): typically 4-6m
+# wide, 1.2m deep. Nullah Leh main channel is wider (~10m) but most
+# widenChannel placements target the smaller tributaries.
+BASELINE_WIDTH_M = 4.0
+BASELINE_DEPTH_M = 1.2
+ENCROACHMENT_SECTION_LENGTH_M = 50.0
+ENCROACHMENT_WIDTH_GAIN_M = 3.0  # typical encroachment removal restores ~3m width
+
+
+def _pond_volume_m3(p):
+    """Retention pond: stores surface_area × depth m³ of floodwater that
+    would otherwise spread across the floodplain — direct volume
+    interception, it never reaches the main flood zone."""
+    area_m2 = _math.pi * p['radius_m'] ** 2
+    return area_m2 * p['depth_m']
+
+
+def _widen_section_length_m(w):
+    if w.get('line_coords'):
+        coords = w['line_coords']
+        cos_lat = _math.cos(_math.radians(33.70))
+        length = 0.0
+        for i in range(len(coords) - 1):
+            dx = (coords[i + 1][0] - coords[i][0]) * 111320 * cos_lat
+            dy = (coords[i + 1][1] - coords[i][1]) * 111320
+            length += _math.sqrt(dx * dx + dy * dy)
+        if length > 1.0:
+            return length
+    return 50.0
+
+
+def _widen_volume_m3(w):
+    """Channel widening (Manning's conveyance): the original Nullah Leh
+    main channel is ~8-12m wide, 1.5m deep, slope ~0.002 m/m, Manning
+    n≈0.04 (concrete-lined urban nullah). A wider channel holds more
+    water within its banks — the extra volume that fits in the widened
+    section without spilling into the floodplain is
+    (new_width - baseline_width) × channel_depth × section_length."""
+    new_width = w.get('buffer_m', 4) * 2  # buffer_m is half the new width
+    section_length_m = _widen_section_length_m(w)
+    width_gain = max(0.0, new_width - BASELINE_WIDTH_M)
+    return width_gain * BASELINE_DEPTH_M * section_length_m
+
+
+def _encroachment_volume_m3():
+    """Remove encroachment: equivalent to restoring ~3m of channel width
+    over the encroachment footprint, same conveyance physics."""
+    return ENCROACHMENT_WIDTH_GAIN_M * BASELINE_DEPTH_M * ENCROACHMENT_SECTION_LENGTH_M
+
+
 def compute_structural_volume_reduction(ponds, widen_actions, encroachments,
                                         cause_type=None):
     """
-    REAL FLOOD ENGINEERING PHYSICS for structural interventions.
-
-    Retention pond: stores surface_area × depth m³ of floodwater that would
-    otherwise spread across the floodplain. This is direct volume interception
-    — it never reaches the main flood zone.
-
-    Widen/deepen channel (Manning's conveyance):
-    The original Nullah Leh main channel is ~8–12m wide, 1.5m deep, slope
-    ~0.002 m/m, Manning n≈0.04 (concrete-lined urban nullah). Using
-    Q = (A / n) × R^(2/3) × S^(1/2):
-    - A = cross-section area (m²), R = hydraulic radius (m)
-    - Each 50m section widened by new_width has its cross-sectional area
-      increased by (new_width − original_width) × depth_m.
-    - Extra volume conveyed per flood event (assumed 3-hour peak):
-      extra_Q × peak_duration_hr × 3600 s
-    - This represents volume that passes THROUGH rather than backing up
-      into the floodplain.
-
-    Remove encroachment: equivalent to restoring ~3m of channel width over
-    the encroachment footprint, same conveyance physics.
+    REAL FLOOD ENGINEERING PHYSICS for structural interventions — total
+    volume across all placed ponds, widened sections and removed
+    encroachments. See _pond_volume_m3 / _widen_volume_m3 /
+    _encroachment_volume_m3 for the per-action formulas (also used by
+    apply_local_protection to place this volume's benefit correctly).
 
     All causes benefit from structural volume reduction — drained fast or
     stored offline, the total ponding volume in the floodplain is reduced.
     """
     total_volume_m3 = 0.0
+    total_volume_m3 += sum(_pond_volume_m3(p) for p in ponds)
+    total_volume_m3 += sum(_widen_volume_m3(w) for w in widen_actions)
+    total_volume_m3 += len(encroachments) * _encroachment_volume_m3()
+    return total_volume_m3
 
-    # --- Retention ponds: direct storage ---
+
+# ---------------------------------------------------------------------
+# LOCAL PROTECTION — river overflow / dam release
+# ---------------------------------------------------------------------
+def _distance_m_from_point(elevation_array, dem_bounds, center_lon, center_lat):
+    """Real-world distance (metres) of every DEM pixel from a point."""
+    west, south, east, north = dem_bounds
+    lat_mid = (north + south) / 2
+    m_per_deg_lat = 111320
+    m_per_deg_lon = 111320 * np.cos(np.radians(lat_mid))
+    pixel_lon, pixel_lat = _pixel_lonlat_grid(elevation_array, dem_bounds)
+    dx = (pixel_lon - center_lon) * m_per_deg_lon
+    dy = (pixel_lat - center_lat) * m_per_deg_lat
+    return np.sqrt(dx * dx + dy * dy)
+
+
+def _distance_m_from_line(elevation_array, dem_bounds, line_coords):
+    """Real-world distance (metres) of every DEM pixel from a polyline."""
+    west, south, east, north = dem_bounds
+    lat_mid = (north + south) / 2
+    m_per_deg_lat = 111320
+    m_per_deg_lon = 111320 * np.cos(np.radians(lat_mid))
+    pixel_lon, pixel_lat = _pixel_lonlat_grid(elevation_array, dem_bounds)
+    px_m, py_m = pixel_lon * m_per_deg_lon, pixel_lat * m_per_deg_lat
+
+    best = None
+    for i in range(len(line_coords) - 1):
+        lon1, lat1 = line_coords[i]
+        lon2, lat2 = line_coords[i + 1]
+        x1, y1 = lon1 * m_per_deg_lon, lat1 * m_per_deg_lat
+        x2, y2 = lon2 * m_per_deg_lon, lat2 * m_per_deg_lat
+        dx, dy = x2 - x1, y2 - y1
+        seg_len_sq = dx * dx + dy * dy
+        if seg_len_sq == 0:
+            dist = np.sqrt((px_m - x1) ** 2 + (py_m - y1) ** 2)
+        else:
+            t = np.clip(((px_m - x1) * dx + (py_m - y1) * dy) / seg_len_sq, 0, 1)
+            closest_x = x1 + t * dx
+            closest_y = y1 + t * dy
+            dist = np.sqrt((px_m - closest_x) ** 2 + (py_m - closest_y) ** 2)
+        best = dist if best is None else np.minimum(best, dist)
+    return best
+
+
+def apply_local_protection(elevation_array, dem_bounds, ponds, widen_actions, encroachments):
+    """
+    LOCAL PROTECTION MODEL for level-driven floods (river overflow, dam
+    release).
+
+    A retention pond or a widened 50m channel section cannot lower an
+    entire river's flood stage — that water is arriving from far outside
+    this DEM. What it CAN honestly do is intercept the water that would
+    otherwise reach ITS OWN immediate surroundings before that water adds
+    to local flood depth there. We model that as a raised "effective
+    ground" covering the intervention's real local service area, sized so
+    the total volume it represents matches the actual intercepted volume
+    computed in _pond_volume_m3 / _widen_volume_m3 / _encroachment_volume_m3
+    — the same physics, just spent locally instead of diluted across the
+    whole study area (which is what made every action look like it did
+    nothing).
+
+    Returns a per-pixel metres-of-protection array, meant to be ADDED to
+    the modified elevation array before computing the "after" flood extent
+    — identical in spirit to how an embankment's raised terrain already
+    works, just sized from volume instead of a fixed height.
+    """
+    protection = np.zeros_like(elevation_array)
+
+    # Base local service radius: matches the placement rules the frontend
+    # already enforces for these tools (ponds sit 10-100m from the nullah,
+    # encroachment removals within 15m of it) — these are neighbourhood-
+    # block-scale interventions, not city-scale ones.
+    BASE_RADIUS_M = 40.0
+
     for p in ponds:
-        area_m2 = _math.pi * p['radius_m'] ** 2
-        depth = p['depth_m']
-        stored_m3 = area_m2 * depth
-        total_volume_m3 += stored_m3
-
-    # --- Channel widening: extra in-channel storage before overtopping ---
-    # A wider channel holds more water within its banks. The extra volume that
-    # fits in the widened section without spilling into the floodplain is:
-    #   (new_width - baseline_width) × channel_depth × section_length
-    # Islamabad nullah tributaries (Lai Nadi, smaller nullahs): typically 4-6m
-    # wide, 1.2m deep. Nullah Leh main channel is wider (~10m) but most
-    # widenChannel placements target the smaller tributaries.
-    BASELINE_WIDTH_M = 4.0
-    BASELINE_DEPTH_M = 1.2
+        stored_m3 = _pond_volume_m3(p)
+        if stored_m3 <= 0:
+            continue
+        # Bigger ponds earn a bigger service radius (a real reservoir
+        # protects more ground than a small detention pond), but even the
+        # smallest pond gets the same base neighbourhood radius.
+        influence_radius_m = max(BASE_RADIUS_M, 2.5 * p['radius_m'])
+        zone_area_m2 = _math.pi * influence_radius_m ** 2
+        depth_reduction_m = stored_m3 / zone_area_m2
+        dist = _distance_m_from_point(elevation_array, dem_bounds, p['lon'], p['lat'])
+        np.maximum(protection, np.where(dist <= influence_radius_m, depth_reduction_m, 0.0), out=protection)
 
     for w in widen_actions:
-        new_width = w.get('buffer_m', 4) * 2  # buffer_m is half the new width
-        section_length_m = 50.0
-        if w.get('line_coords'):
-            coords = w['line_coords']
-            cos_lat = _math.cos(_math.radians(33.70))
-            length = 0.0
-            for i in range(len(coords) - 1):
-                dx = (coords[i + 1][0] - coords[i][0]) * 111320 * cos_lat
-                dy = (coords[i + 1][1] - coords[i][1]) * 111320
-                length += _math.sqrt(dx * dx + dy * dy)
-            if length > 1.0:
-                section_length_m = length
+        extra_vol = _widen_volume_m3(w)
+        if extra_vol <= 0 or not w.get('line_coords'):
+            continue
+        section_length_m = _widen_section_length_m(w)
+        influence_buffer_m = BASE_RADIUS_M  # floodplain directly served by this reach
+        zone_area_m2 = 2 * influence_buffer_m * section_length_m
+        depth_reduction_m = extra_vol / zone_area_m2
+        dist = _distance_m_from_line(elevation_array, dem_bounds, w['line_coords'])
+        np.maximum(protection, np.where(dist <= influence_buffer_m, depth_reduction_m, 0.0), out=protection)
 
-        width_gain = max(0.0, new_width - BASELINE_WIDTH_M)
-        extra_vol = width_gain * BASELINE_DEPTH_M * section_length_m
-        total_volume_m3 += extra_vol
-
-    # --- Remove encroachment: restores ~3m of channel width over ~50m section ---
     for r in encroachments:
-        restored_gain = 3.0  # typical encroachment removal restores ~3m width
-        extra_vol = restored_gain * BASELINE_DEPTH_M * 50.0
-        total_volume_m3 += extra_vol
+        extra_vol = _encroachment_volume_m3()
+        influence_radius_m = BASE_RADIUS_M
+        zone_area_m2 = _math.pi * influence_radius_m ** 2
+        depth_reduction_m = extra_vol / zone_area_m2
+        dist = _distance_m_from_point(elevation_array, dem_bounds, r['lon'], r['lat'])
+        np.maximum(protection, np.where(dist <= influence_radius_m, depth_reduction_m, 0.0), out=protection)
 
-    return total_volume_m3
+    return protection

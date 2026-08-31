@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation';
 import * as maplibregl from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import * as turf from '@turf/turf';
+import { deriveImpact, formatFloodPctDelta } from '@/lib/impactFormat';
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8002';
 
@@ -416,7 +417,7 @@ const RESPONSE_TOOLS = [
 const PREVENTION_TOOLS = [
   {
     key: 'desilt',
-    label: 'Desilt nullah section',
+    label: 'Desilt Nullah',
     causeTypes: ['rainfall', 'drainage_failure'],
     emoji: '🪣',
     color: '#0891b2',
@@ -434,7 +435,7 @@ const PREVENTION_TOOLS = [
   },
   {
     key: 'clearDrains',
-    label: 'Clear blocked drains',
+    label: 'Unblock Drain',
     causeTypes: ['rainfall', 'drainage_failure'],
     emoji: '🕳️',
     color: '#f59e0b',
@@ -451,7 +452,7 @@ const PREVENTION_TOOLS = [
   },
   {
     key: 'embankment',
-    label: 'Build / raise embankment',
+    label: 'Raise Protective Bank',
     causeTypes: ['river_overflow', 'dam_release'],
     emoji: '🧱',
     color: '#78350f',
@@ -480,7 +481,7 @@ const PREVENTION_TOOLS = [
   },
   {
     key: 'widenChannel',
-    label: 'Widen channel section',
+    label: 'Widen Waterway',
     causeTypes: ['rainfall', 'river_overflow', 'drainage_failure'],
     emoji: '📏',
     color: '#0284c7',
@@ -503,7 +504,7 @@ const PREVENTION_TOOLS = [
   },
   {
     key: 'removeEncroachment',
-    label: 'Remove encroachment',
+    label: 'Clear Blocking Structure',
     causeTypes: ['river_overflow', 'dam_release'],
     emoji: '🏚️',
     color: '#b91c1c',
@@ -524,7 +525,7 @@ const PREVENTION_TOOLS = [
   },
   {
     key: 'retentionPond',
-    label: 'Retention pond',
+    label: 'Water Storage Pond',
     causeTypes: ['rainfall', 'river_overflow', 'drainage_failure', 'dam_release'],
     emoji: '🌊',
     color: '#0d9488',
@@ -548,7 +549,7 @@ const PREVENTION_TOOLS = [
   },
   {
     key: 'warningGauge',
-    label: 'Community alert point',
+    label: 'Flood Alert Sensor',
     causeTypes: ['river_overflow', 'drainage_failure', 'dam_release'],
     emoji: '🔊',
     color: '#7c3aed',
@@ -571,7 +572,7 @@ const PREVENTION_TOOLS = [
   },
   {
     key: 'greenBuffer',
-    label: 'Green buffer / plantation',
+    label: 'Tree Buffer Zone',
     causeTypes: ['rainfall', 'river_overflow', 'dam_release'],
     emoji: '🌳',
     color: '#16a34a',
@@ -2202,11 +2203,11 @@ function formatParams(toolDef, params) {
 
 const ACTION_SYNONYMS = {
   // Existing prevention tools
-  desilt: ['desilt', 'mud', 'sediment', 'silt', 'dredge', 'dig', 'excavate'],
+  desilt: ['desilt', 'mud', 'sediment', 'silt', 'dredge', 'dig', 'excavate', 'clean waterway', 'waterway bed'],
   clearDrains: ['drain', 'blocked', 'clear', 'unclog', 'choke', 'debris', 'clean drain'],
-  embankment: ['embankment', 'levee', 'raise bank', 'bund', 'barrier along'],
+  embankment: ['embankment', 'levee', 'raise bank', 'protective bank', 'bund', 'barrier along'],
   widenChannel: ['widen', 'broaden', 'expand channel', 'narrow', 'channel width'],
-  removeEncroachment: ['encroachment', 'illegal', 'demolish', 'structure blocking', 'remove building'],
+  removeEncroachment: ['encroachment', 'illegal', 'demolish', 'structure blocking', 'blocking structure', 'remove building'],
   retentionPond: ['pond', 'reservoir', 'storage', 'detention', 'retention', 'hold water'],
   warningGauge: ['warning', 'alert', 'siren', 'monitor', 'loudspeaker', 'warn', 'announce'],
   greenBuffer: ['green', 'tree', 'plant', 'vegetation', 'buffer', 'mangrove', 'plantation'],
@@ -2309,7 +2310,7 @@ var CUSTOM_ACTION_TOOL = {
 var CUSTOM_ACTIONS = [
   {
     key: 'raiseRoad',
-    label: 'Raise road',
+    label: 'Raise Road Level',
     causeTypes: ['rainfall', 'drainage_failure', 'dam_release'],
     emoji: '🛣️',
     color: '#d97706',
@@ -2668,7 +2669,12 @@ export default function PlanWorkspace() {
     }
     if (!beforeMapContainer.current || !afterMapContainer.current) return;
 
-    // Compute bbox from action coordinates, fallback to full DEM bounds
+    // Frame the thumbnail around the REAL flooded area, not just the
+    // placed actions — zooming tightly to a small action cluster can crop
+    // into one uniformly-flooded patch of a much larger flood and render
+    // as a solid color block with no visible street detail (the image is
+    // fine; only the camera was wrong). Widen that box to also include
+    // every action's coordinates so placed markers stay in frame.
     var actions = lastActionsRef.current;
     var lons = [], lats = [];
     actions.forEach(function (a) {
@@ -2677,14 +2683,23 @@ export default function PlanWorkspace() {
     });
     var pad = 0.005;
     var fb = preventionResult.flood_image_bounds;
+    var floodedBbox = preventionResult.before && preventionResult.before.flooded_bbox;
     var w, s, e, n;
-    if (lons.length > 0) {
+    if (floodedBbox) {
+      w = floodedBbox[0]; s = floodedBbox[1]; e = floodedBbox[2]; n = floodedBbox[3];
+    } else if (lons.length > 0) {
       w = Math.min.apply(null, lons) - pad;
       s = Math.min.apply(null, lats) - pad;
       e = Math.max.apply(null, lons) + pad;
       n = Math.max.apply(null, lats) + pad;
     } else {
       w = fb[0]; s = fb[1]; e = fb[2]; n = fb[3];
+    }
+    if (lons.length > 0) {
+      w = Math.min(w, Math.min.apply(null, lons) - pad);
+      s = Math.min(s, Math.min.apply(null, lats) - pad);
+      e = Math.max(e, Math.max.apply(null, lons) + pad);
+      n = Math.max(n, Math.max.apply(null, lats) + pad);
     }
     var fitBounds = [[w, s], [e, n]];
     var imgCoords = [[fb[0], fb[3]], [fb[2], fb[3]], [fb[2], fb[1]], [fb[0], fb[1]]];
@@ -2731,7 +2746,13 @@ export default function PlanWorkspace() {
       if (beforeMapRef.current) { beforeMapRef.current.remove(); beforeMapRef.current = null; }
       if (afterMapRef.current) { afterMapRef.current.remove(); afterMapRef.current = null; }
     };
-  }, [preventionResult]);
+    // showBreakdown is a real dependency, not just a lint requirement: the
+    // container divs below are only rendered when `!showBreakdown`, so they
+    // unmount/remount as it toggles. Without this, returning from the full
+    // report re-creates the container DOM nodes but this effect never
+    // re-runs (preventionResult hasn't changed), leaving the new nodes with
+    // no maplibre map attached — a blank box with no error.
+  }, [preventionResult, showBreakdown]);
 
   // Stage 2: mount per-action mini maps (before + after) when breakdown is shown
   useEffect(() => {
@@ -3351,24 +3372,15 @@ export default function PlanWorkspace() {
         },
       });
 
+      // Source only — no circle layer rendered from it. The persistent
+      // emoji marker (see persistentMarkersRef below) is the single icon
+      // per plan item; a colored circle layer used to render underneath
+      // it too, which duplicated that icon with an unlabelled colour
+      // swatch. The source stays so setData() below keeps working, but
+      // nothing draws from it now.
       map.addSource('plan-markers', {
         type: 'geojson',
         data: { type: 'FeatureCollection', features: [] },
-      });
-      map.addLayer({
-        id: 'plan-markers-layer',
-        type: 'circle',
-        source: 'plan-markers',
-        paint: {
-          'circle-radius': [
-            'case',
-            ['==', ['get', 'markerType'], 'retentionPond'], 18,
-            11,
-          ],
-          'circle-color': ['get', 'color'],
-          'circle-stroke-width': 3,
-          'circle-stroke-color': '#ffffff',
-        },
       });
 
       map.addSource('embankment-lines', {
@@ -3503,6 +3515,18 @@ export default function PlanWorkspace() {
 
       map.on('click', function (ev) {
         const toolKey = activeToolRef.current;
+
+        if (typeof window !== 'undefined' && window.__mohafizDebugMarkers) {
+          // Temporary debug aid — compares the raw click pixel to the
+          // lngLat maplibre resolved it to, so a mismatch between "where
+          // I clicked" and "where the marker ends up" can be isolated to
+          // either this click-to-coordinate step or the later render step.
+          console.log('[click-debug]', {
+            pixel: { x: ev.point.x, y: ev.point.y },
+            lngLat: { lng: ev.lngLat.lng, lat: ev.lngLat.lat },
+            devicePixelRatio: window.devicePixelRatio,
+          });
+        }
 
         if (toolKey === 'setStart') {
           setStartPoint({ lat: ev.lngLat.lat, lon: ev.lngLat.lng });
@@ -3688,7 +3712,10 @@ export default function PlanWorkspace() {
       activeUids[m._uid] = true;
       if (!current[m._uid]) {
         var el = document.createElement('div');
-        el.style.fontSize = '20px';
+        // 1.7x the old 20px — anchor stays 'center' below, which maplibre
+        // implements as a CSS translate(-50%,-50%) on this element, so it
+        // stays correctly centered on [m.lon, m.lat] at any font size.
+        el.style.fontSize = '34px';
         el.style.lineHeight = '1';
         el.style.textAlign = 'center';
         el.style.pointerEvents = 'none';
@@ -3699,25 +3726,27 @@ export default function PlanWorkspace() {
         // Same-type markers dropped on top of each other are fanned out
         // along a spiral and numbered, so the second never hides the
         // first. The offset is display-only — m.lat / m.lon stay exact.
+        // Spread is scaled up to match the larger icon so two 34px emoji
+        // don't still overlap the way two 20px ones would at the old radius.
         if (m.stackIndex) {
           const angle = (m.stackIndex * 137.5) * Math.PI / 180;
-          const spread = 12 + m.stackIndex * 5;
+          const spread = 20 + m.stackIndex * 8;
           el.style.transform = 'translate(' + Math.round(Math.cos(angle) * spread) + 'px, ' +
             Math.round(Math.sin(angle) * spread) + 'px)';
 
           const badge = document.createElement('span');
           badge.textContent = String(m.stackIndex + 1);
           badge.style.position = 'absolute';
-          badge.style.top = '-5px';
-          badge.style.right = '-9px';
-          badge.style.minWidth = '13px';
-          badge.style.padding = '0 3px';
-          badge.style.borderRadius = '7px';
+          badge.style.top = '-6px';
+          badge.style.right = '-11px';
+          badge.style.minWidth = '16px';
+          badge.style.padding = '0 4px';
+          badge.style.borderRadius = '8px';
           badge.style.background = m.color;
           badge.style.color = '#ffffff';
-          badge.style.fontSize = '9px';
+          badge.style.fontSize = '11px';
           badge.style.fontWeight = '800';
-          badge.style.lineHeight = '13px';
+          badge.style.lineHeight = '16px';
           badge.style.textShadow = 'none';
           badge.style.boxShadow = '0 0 0 1.5px #ffffff';
           badge.style.fontFamily = 'system-ui, sans-serif';
@@ -3727,6 +3756,21 @@ export default function PlanWorkspace() {
         current[m._uid] = new maplibregl.Marker({ element: el, anchor: 'center' })
           .setLngLat([m.lon, m.lat])
           .addTo(map);
+
+        if (typeof window !== 'undefined' && window.__mohafizDebugMarkers) {
+          // Temporary debug aid for the click-vs-render investigation —
+          // compares the stored lon/lat against where maplibre actually
+          // painted the element, in screen pixels, after layout settles.
+          setTimeout(function () {
+            var rect = el.getBoundingClientRect();
+            var screenPt = map.project([m.lon, m.lat]);
+            console.log('[marker-debug]', m.type, {
+              storedLonLat: [m.lon, m.lat],
+              mapProjectedPx: { x: screenPt.x, y: screenPt.y },
+              renderedCenterPx: { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 },
+            });
+          }, 0);
+        }
       }
     });
 
@@ -5387,10 +5431,10 @@ export default function PlanWorkspace() {
               <div style={{ fontSize: 10, color: '#64748b' }}>
                 Try: {(function () {
                   var suggestions = {
-                    rainfall:         '\u201cClear blocked drains\u201d, \u201cBuild a retention pond\u201d, \u201cRaise the road by 1m\u201d',
-                    river_overflow:   '\u201cBuild an embankment\u201d, \u201cRemove encroachment\u201d, \u201cInstall warning gauge\u201d',
-                    drainage_failure: '\u201cDesilt the drain\u201d, \u201cClear blocked drain\u201d, \u201cAdd a drainage channel\u201d',
-                    dam_release:      '\u201cRaise embankments\u201d, \u201cCreate flood storage\u201d, \u201cEarly warning gauge\u201d',
+                    rainfall:         '\u201cUnblock the drain\u201d, \u201cBuild a water storage pond\u201d, \u201cRaise the road by 1m\u201d',
+                    river_overflow:   '\u201cRaise a protective bank\u201d, \u201cClear the blocking structure\u201d, \u201cInstall a flood alert sensor\u201d',
+                    drainage_failure: '\u201cDesilt the nullah\u201d, \u201cUnblock the drain\u201d, \u201cAdd a drainage channel\u201d',
+                    dam_release:      '\u201cRaise protective banks\u201d, \u201cCreate flood storage\u201d, \u201cAdd a flood alert sensor\u201d',
                   };
                   var ct = scenario && scenario.cause_type;
                   return suggestions[ct] || '\u201cRaise the road\u201d, \u201cBuild a drainage channel\u201d, \u201cCreate a flood barrier\u201d';
@@ -5525,26 +5569,31 @@ export default function PlanWorkspace() {
 
         {currentEmbankments.length > 0 && (
           <div style={{ fontSize: 12, color: '#334155', marginBottom: 5 }}>
-            🧱 <b>{currentEmbankments.length}</b> × Build / raise embankment
+            🧱 <b>{currentEmbankments.length}</b> × {(PREVENTION_TOOLS.find(function (t) { return t.key === 'embankment'; }) || {}).label || 'Raise Protective Bank'}
             {currentEmbankments.map(function (e, i) {
               return (
                 <div key={i} style={{ fontSize: 10, marginLeft: 20, marginTop: 4, padding: 6, background: '#f8fafc', borderRadius: 6 }}>
                   <div style={{ color: '#475569', fontWeight: 600 }}>
                     {e.lengthM}m long, {e.heightM}m high, {e.material}
                   </div>
-                  {e.difference ? (
-                    <div style={{ marginTop: 3 }}>
-                      <div style={{ color: '#059669', fontWeight: 700 }}>
-                        ✅ {e.difference.roads_saved} road{e.difference.roads_saved !== 1 ? 's' : ''} saved
+                  {e.difference ? (function () {
+                    var impact = deriveImpact(e.before, e.after);
+                    return (
+                      <div style={{ marginTop: 3 }}>
+                        <div style={{ color: impact.roadsSaved > 0 ? '#059669' : '#94a3b8', fontWeight: 700 }}>
+                          {impact.roadsSaved > 0
+                            ? '✅ ' + impact.roadsSaved + ' road' + (impact.roadsSaved !== 1 ? 's' : '') + ' saved'
+                            : 'No roads affected'}
+                        </div>
+                        <div style={{ color: '#64748b' }}>
+                          {impact.areaSavedM2 > 0 ? impact.areaSavedM2.toLocaleString() + ' m² protected' : 'No area change'}
+                        </div>
+                        <div style={{ color: '#94a3b8', fontSize: 9 }}>
+                          {e.before.flooded_percent}% → {e.after.flooded_percent}% flooded
+                        </div>
                       </div>
-                      <div style={{ color: '#64748b' }}>
-                        {e.difference.area_saved_m2 > 0 ? Math.round(e.difference.area_saved_m2) + ' m² protected' : 'No area change'}
-                      </div>
-                      <div style={{ color: '#94a3b8', fontSize: 9 }}>
-                        {e.before.flooded_percent}% → {e.after.flooded_percent}% flooded
-                      </div>
-                    </div>
-                  ) : (
+                    );
+                  })() : (
                     <div style={{ color: '#94a3b8' }}>Calculating impact...</div>
                   )}
                 </div>
@@ -5775,35 +5824,73 @@ export default function PlanWorkspace() {
               </div>
             </div>
 
-            <div style={{
-              background: '#f0fdf4',
-              border: '1px solid #bbf7d0',
-              borderRadius: 12,
-              padding: 12,
-              display: 'flex',
-              gap: 20,
-              justifyContent: 'center',
-              fontSize: 12,
-              marginBottom: 8,
-            }}>
-              <div>
-                <span style={{ color: '#059669', fontWeight: 800 }}>
-                  -{preventionResult.difference.flooded_percent_change}%
-                </span>
-                <span style={{ color: '#64748b', marginLeft: 4 }}>flood area</span>
-              </div>
-              <div>
-                <span style={{ color: '#059669', fontWeight: 800 }}>
-                  {preventionResult.difference.roads_saved}
-                </span>
-                <span style={{ color: '#64748b', marginLeft: 4 }}>roads saved</span>
-              </div>
-              <div>
-                <span style={{ color: '#059669', fontWeight: 800 }}>
-                  {preventionResult.difference.buildings_saved}
-                </span>
-                <span style={{ color: '#64748b', marginLeft: 4 }}>buildings protected</span>
-              </div>
+            {(function () {
+              var impact = deriveImpact(preventionResult.before, preventionResult.after);
+              var goodColor = '#059669';
+              var flatColor = '#94a3b8';
+              if (!impact.hasMeasurableEffect) {
+                return (
+                  <div style={{
+                    background: '#f8fafc',
+                    border: '1px solid #e2e8f0',
+                    borderRadius: 12,
+                    padding: 12,
+                    textAlign: 'center',
+                    fontSize: 12,
+                    color: '#64748b',
+                    marginBottom: 8,
+                  }}>
+                    No measurable improvement at this scale — the flood extent, roads and buildings are unchanged.
+                  </div>
+                );
+              }
+              return (
+                <div style={{
+                  background: '#f0fdf4',
+                  border: '1px solid #bbf7d0',
+                  borderRadius: 12,
+                  padding: 12,
+                  display: 'flex',
+                  gap: 20,
+                  justifyContent: 'center',
+                  fontSize: 12,
+                  marginBottom: 8,
+                }}>
+                  <div>
+                    <span style={{ color: impact.floodedPercentChange > 0 ? goodColor : flatColor, fontWeight: 800 }}>
+                      {impact.floodedPercentChange}%
+                    </span>
+                    <span style={{ color: '#64748b', marginLeft: 4 }}>less flood area</span>
+                  </div>
+                  <div>
+                    <span style={{ color: impact.areaSavedM2 > 0 ? goodColor : flatColor, fontWeight: 800 }}>
+                      {impact.areaSavedM2.toLocaleString()} m²
+                    </span>
+                    <span style={{ color: '#64748b', marginLeft: 4 }}>area saved</span>
+                  </div>
+                  <div>
+                    <span style={{ color: impact.roadsSaved > 0 ? goodColor : flatColor, fontWeight: 800 }}>
+                      {impact.roadsSaved}
+                    </span>
+                    <span style={{ color: '#64748b', marginLeft: 4 }}>roads saved</span>
+                  </div>
+                  <div>
+                    <span style={{ color: impact.buildingsSaved > 0 ? goodColor : flatColor, fontWeight: 800 }}>
+                      {impact.buildingsSaved}
+                    </span>
+                    <span style={{ color: '#64748b', marginLeft: 4 }}>buildings protected</span>
+                  </div>
+                </div>
+              );
+            })()}
+
+            <div style={{ fontSize: 9, color: '#64748b', marginBottom: 12, padding: '0 4px', display: 'flex', gap: 12, alignItems: 'center' }}>
+              <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                <span style={{ width: 9, height: 9, borderRadius: 2, background: '#2563eb', display: 'inline-block' }} /> still flooded
+              </span>
+              <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                <span style={{ width: 9, height: 9, borderRadius: 2, background: '#10b981', display: 'inline-block' }} /> protected by this plan
+              </span>
             </div>
 
             {(preventionResult.difference.water_level_saved_m > 0 || preventionResult.difference.volume_stored_m3 > 0) && (
@@ -5822,11 +5909,23 @@ export default function PlanWorkspace() {
               }}>
                 <span style={{ fontSize: 13 }}>💧</span>
                 <div>
-                  <span style={{ fontWeight: 800 }}>Water level lowered by {preventionResult.difference.water_level_saved_m}m</span>
-                  <span style={{ color: '#3b82f6', marginLeft: 6 }}>—</span>
-                  <span style={{ marginLeft: 6 }}>
-                    <span style={{ fontWeight: 700 }}>{Number(preventionResult.difference.volume_stored_m3).toLocaleString()} m³</span> intercepted before it reaches the floodplain
-                  </span>
+                  {preventionResult.difference.water_level_saved_m > 0 ? (
+                    <>
+                      <span style={{ fontWeight: 800 }}>Water level lowered by {preventionResult.difference.water_level_saved_m}m</span>
+                      <span style={{ color: '#3b82f6', marginLeft: 6 }}>—</span>
+                      <span style={{ marginLeft: 6 }}>
+                        <span style={{ fontWeight: 700 }}>{Number(preventionResult.difference.volume_stored_m3).toLocaleString()} m³</span> intercepted before it reaches the floodplain
+                      </span>
+                    </>
+                  ) : (
+                    <>
+                      <span style={{ fontWeight: 800 }}>{Number(preventionResult.difference.volume_stored_m3).toLocaleString()} m³ intercepted locally</span>
+                      <span style={{ color: '#3b82f6', marginLeft: 6 }}>—</span>
+                      <span style={{ marginLeft: 6 }}>
+                        a single measure can&apos;t lower this river&apos;s overall flood stage, but it protects the ground around it (see green area above)
+                      </span>
+                    </>
+                  )}
                 </div>
               </div>
             )}
@@ -5937,27 +6036,53 @@ export default function PlanWorkspace() {
               </div>
             </div>
 
-            {/* Total effect banner */}
-            <div style={{ display: 'flex', gap: 12, marginBottom: 16 }}>
-              <div style={{ flex: 1, background: 'linear-gradient(135deg, #ecfdf5, #d1fae5)', borderRadius: 14, padding: '14px 16px', textAlign: 'center', border: '1px solid #a7f3d0' }}>
-                <div style={{ fontSize: 28, fontWeight: 900, color: '#059669', lineHeight: 1 }}>
-                  -{(breakdownResult.total_effect && breakdownResult.total_effect.flooded_percent_change) || 0}%
-                </div>
-                <div style={{ fontSize: 10, color: '#065f46', fontWeight: 700, marginTop: 4 }}>Flood Area Reduction</div>
-              </div>
-              <div style={{ flex: 1, background: 'linear-gradient(135deg, #eff6ff, #dbeafe)', borderRadius: 14, padding: '14px 16px', textAlign: 'center', border: '1px solid #93c5fd' }}>
-                <div style={{ fontSize: 28, fontWeight: 900, color: '#2563eb', lineHeight: 1 }}>
-                  {(breakdownResult.total_effect && breakdownResult.total_effect.roads_saved) || 0}
-                </div>
-                <div style={{ fontSize: 10, color: '#1e3a8a', fontWeight: 700, marginTop: 4 }}>Roads Protected</div>
-              </div>
-              <div style={{ flex: 1, background: 'linear-gradient(135deg, #fdf4ff, #f3e8ff)', borderRadius: 14, padding: '14px 16px', textAlign: 'center', border: '1px solid #d8b4fe' }}>
-                <div style={{ fontSize: 28, fontWeight: 900, color: '#7c3aed', lineHeight: 1 }}>
-                  {(breakdownResult.total_effect && breakdownResult.total_effect.buildings_saved) || 0}
-                </div>
-                <div style={{ fontSize: 10, color: '#4c1d95', fontWeight: 700, marginTop: 4 }}>Buildings Protected</div>
-              </div>
-            </div>
+            {/* Total effect banner — every number here is already clamped
+                server-side (max(0, before - after)), so 0 always means
+                "no measurable improvement", never a hidden negative. */}
+            {(function () {
+              var te = breakdownResult.total_effect || {};
+              var flat = { bg: 'linear-gradient(135deg, #f8fafc, #f1f5f9)', border: '#e2e8f0', text: '#94a3b8', label: '#64748b' };
+              var pctStyle = te.flooded_percent_change > 0 ? { bg: 'linear-gradient(135deg, #ecfdf5, #d1fae5)', border: '#a7f3d0', text: '#059669', label: '#065f46' } : flat;
+              var areaStyle = te.area_saved_m2 > 0 ? { bg: 'linear-gradient(135deg, #ecfdf5, #d1fae5)', border: '#a7f3d0', text: '#059669', label: '#065f46' } : flat;
+              var roadsStyle = te.roads_saved > 0 ? { bg: 'linear-gradient(135deg, #eff6ff, #dbeafe)', border: '#93c5fd', text: '#2563eb', label: '#1e3a8a' } : flat;
+              var bldgStyle = te.buildings_saved > 0 ? { bg: 'linear-gradient(135deg, #fdf4ff, #f3e8ff)', border: '#d8b4fe', text: '#7c3aed', label: '#4c1d95' } : flat;
+              var hasEffect = te.flooded_percent_change > 0 || te.area_saved_m2 > 0 || te.roads_saved > 0 || te.buildings_saved > 0;
+              return (
+                <>
+                  <div style={{ display: 'flex', gap: 12, marginBottom: hasEffect ? 16 : 8 }}>
+                    <div style={{ flex: 1, background: pctStyle.bg, borderRadius: 14, padding: '14px 16px', textAlign: 'center', border: '1px solid ' + pctStyle.border }}>
+                      <div style={{ fontSize: 28, fontWeight: 900, color: pctStyle.text, lineHeight: 1 }}>
+                        {te.flooded_percent_change || 0}%
+                      </div>
+                      <div style={{ fontSize: 10, color: pctStyle.label, fontWeight: 700, marginTop: 4 }}>Flood Area Reduction</div>
+                    </div>
+                    <div style={{ flex: 1, background: areaStyle.bg, borderRadius: 14, padding: '14px 16px', textAlign: 'center', border: '1px solid ' + areaStyle.border }}>
+                      <div style={{ fontSize: 22, fontWeight: 900, color: areaStyle.text, lineHeight: 1 }}>
+                        {Number(te.area_saved_m2 || 0).toLocaleString()}
+                      </div>
+                      <div style={{ fontSize: 10, color: areaStyle.label, fontWeight: 700, marginTop: 4 }}>m² Area Saved</div>
+                    </div>
+                    <div style={{ flex: 1, background: roadsStyle.bg, borderRadius: 14, padding: '14px 16px', textAlign: 'center', border: '1px solid ' + roadsStyle.border }}>
+                      <div style={{ fontSize: 28, fontWeight: 900, color: roadsStyle.text, lineHeight: 1 }}>
+                        {te.roads_saved || 0}
+                      </div>
+                      <div style={{ fontSize: 10, color: roadsStyle.label, fontWeight: 700, marginTop: 4 }}>Roads Protected</div>
+                    </div>
+                    <div style={{ flex: 1, background: bldgStyle.bg, borderRadius: 14, padding: '14px 16px', textAlign: 'center', border: '1px solid ' + bldgStyle.border }}>
+                      <div style={{ fontSize: 28, fontWeight: 900, color: bldgStyle.text, lineHeight: 1 }}>
+                        {te.buildings_saved || 0}
+                      </div>
+                      <div style={{ fontSize: 10, color: bldgStyle.label, fontWeight: 700, marginTop: 4 }}>Buildings Protected</div>
+                    </div>
+                  </div>
+                  {!hasEffect && (
+                    <div style={{ fontSize: 11, color: '#64748b', marginBottom: 16, padding: '0 4px' }}>
+                      No measurable improvement at this scale — the combined plan doesn&apos;t change flood extent, roads or buildings.
+                    </div>
+                  )}
+                </>
+              );
+            })()}
 
             {/* Physics impact row */}
             {breakdownResult.total_effect && (breakdownResult.total_effect.water_level_saved_m > 0 || breakdownResult.total_effect.volume_stored_m3 > 0) && (
@@ -5973,9 +6098,13 @@ export default function PlanWorkspace() {
               }}>
                 <div style={{ textAlign: 'center', flex: 1 }}>
                   <div style={{ fontSize: 22, fontWeight: 900, color: '#1d4ed8', lineHeight: 1 }}>
-                    -{breakdownResult.total_effect.water_level_saved_m}m
+                    {breakdownResult.total_effect.water_level_saved_m > 0
+                      ? breakdownResult.total_effect.water_level_saved_m + 'm'
+                      : Number(breakdownResult.total_effect.locally_protected_m3 || 0).toLocaleString()}
                   </div>
-                  <div style={{ fontSize: 10, color: '#1e3a8a', fontWeight: 700, marginTop: 4 }}>Water Level Lowered</div>
+                  <div style={{ fontSize: 10, color: '#1e3a8a', fontWeight: 700, marginTop: 4 }}>
+                    {breakdownResult.total_effect.water_level_saved_m > 0 ? 'Water Level Lowered' : 'm³ Protecting Local Area'}
+                  </div>
                 </div>
                 <div style={{ width: 1, height: 36, background: '#bfdbfe' }} />
                 <div style={{ textAlign: 'center', flex: 1 }}>
@@ -6051,7 +6180,12 @@ export default function PlanWorkspace() {
                         )}
                         {row.volume_stored_m3 > 0 && (
                           <div style={{ fontSize: 9, color: '#2563eb', marginTop: 2 }}>
-                            💧 {Number(row.volume_stored_m3).toLocaleString()} m³ intercepted · -{row.water_level_saved_m}m water level
+                            💧 {Number(row.volume_stored_m3).toLocaleString()} m³ intercepted
+                            {row.water_level_saved_m > 0
+                              ? ' · ' + row.water_level_saved_m + 'm water level drop'
+                              : row.area_saved_m2 > 0
+                                ? ' · ' + Number(row.area_saved_m2).toLocaleString() + ' m² protected locally'
+                                : ' · protects its immediate surroundings, not the whole river stage'}
                           </div>
                         )}
                       </td>
@@ -6068,8 +6202,8 @@ export default function PlanWorkspace() {
                           {row.honesty_tier}
                         </span>
                       </td>
-                      <td style={{ padding: '8px 4px', textAlign: 'right', fontWeight: 600, color: row.delta_flooded_percent > 0 ? '#059669' : '#94a3b8' }}>
-                        {row.delta_flooded_percent > 0 ? '-' + row.delta_flooded_percent : row.delta_flooded_percent}%
+                      <td style={{ padding: '8px 4px', textAlign: 'right', fontWeight: 600, color: formatFloodPctDelta(row.delta_flooded_percent).color }}>
+                        {formatFloodPctDelta(row.delta_flooded_percent).text}
                       </td>
                       <td style={{ padding: '8px 4px', textAlign: 'right', fontWeight: 600, color: row.roads_saved > 0 ? '#059669' : '#94a3b8' }}>
                         {row.roads_saved > 0 ? row.roads_saved : '—'}
@@ -6085,13 +6219,13 @@ export default function PlanWorkspace() {
                 <tr style={{ borderTop: '2px solid #e2e8f0', fontWeight: 800 }}>
                   <td style={{ padding: '8px 4px', color: '#0f172a' }}>Combined Total</td>
                   <td></td>
-                  <td style={{ padding: '8px 4px', textAlign: 'right', color: '#059669' }}>
-                    -{(breakdownResult.total_effect && breakdownResult.total_effect.flooded_percent_change) || 0}%
+                  <td style={{ padding: '8px 4px', textAlign: 'right', color: formatFloodPctDelta((breakdownResult.total_effect && breakdownResult.total_effect.flooded_percent_change) || 0).color }}>
+                    {formatFloodPctDelta((breakdownResult.total_effect && breakdownResult.total_effect.flooded_percent_change) || 0).text}
                   </td>
-                  <td style={{ padding: '8px 4px', textAlign: 'right', color: '#059669' }}>
+                  <td style={{ padding: '8px 4px', textAlign: 'right', color: (breakdownResult.total_effect && breakdownResult.total_effect.roads_saved) > 0 ? '#059669' : '#94a3b8' }}>
                     {(breakdownResult.total_effect && breakdownResult.total_effect.roads_saved) || 0}
                   </td>
-                  <td style={{ padding: '8px 4px', textAlign: 'right', color: '#059669' }}>
+                  <td style={{ padding: '8px 4px', textAlign: 'right', color: (breakdownResult.total_effect && breakdownResult.total_effect.buildings_saved) > 0 ? '#059669' : '#94a3b8' }}>
                     {(breakdownResult.total_effect && breakdownResult.total_effect.buildings_saved) || 0}
                   </td>
                 </tr>
