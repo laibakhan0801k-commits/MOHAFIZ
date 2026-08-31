@@ -400,6 +400,29 @@ def render_flood_png_base64(flooded_mask):
     encoded = base64.b64encode(buffer.getvalue()).decode("utf-8")
     return f"data:image/png;base64,{encoded}"
 
+
+def render_flood_comparison_png_base64(before_mask, after_mask):
+    """
+    The "after" picture for a prevention comparison: still-flooded ground
+    stays the same blue as the before image, but ground that WAS flooded
+    and no longer is gets highlighted green — the real, visible area a
+    plan's actions protected, not just a slightly-smaller blue blob.
+    """
+    height, width = before_mask.shape
+    rgba = np.zeros((height, width, 4), dtype=np.uint8)
+
+    saved = before_mask & ~after_mask
+    still_flooded = after_mask
+
+    rgba[still_flooded] = [37, 99, 235, 170]   # blue — still flooded
+    rgba[saved] = [16, 185, 129, 210]          # green — protected by the plan
+
+    img = Image.fromarray(rgba, mode="RGBA")
+    buffer = io.BytesIO()
+    img.save(buffer, format="PNG")
+    encoded = base64.b64encode(buffer.getvalue()).decode("utf-8")
+    return f"data:image/png;base64,{encoded}"
+
 def get_flooded_bbox(flooded_mask, min_span_deg=0.01):
     """
     Returns [west, south, east, north] — the tight bounding box around
@@ -560,6 +583,28 @@ def apply_line_raise(elevation_array, dem_bounds, line_coords, height_m, buffer_
     return modified
 
 
+def exclude_engineered_footprint(elevation_array, engineered_mask):
+    """
+    A retention pond, a widened/deepened channel, or a restored channel
+    where an encroachment stood is DESIGNED to hold water — that water is
+    the measure working as intended, not flood damage. Without this, the
+    "after" flood extent counts the pond's own water as newly flooded
+    ground, making every structural intervention look like it makes
+    things worse (more roads cut, more area flooded) purely from its own
+    footprint.
+
+    Returns a COPY with engineered cells pushed safely above any real
+    water level, so flood-extent / road / building / depth calculations
+    correctly exclude them from the damage count.
+    """
+    if not engineered_mask.any():
+        return elevation_array
+    out = elevation_array.copy()
+    ceiling = float(np.nanmax(elevation_array)) + 1000.0
+    out[engineered_mask] = ceiling
+    return out
+
+
 def compute_flood_extent_on_array(elevation_array, water_level_m):
     """Same physics as compute_flood_extent, but works on ANY elevation
     array — lets us compare the real terrain against a modified version
@@ -619,3 +664,594 @@ def compute_depth_grid(water_level_m: float):
         "bounds": [west, south, east, north],
     }
     return depth, meta
+
+
+# ---------------------------------------------------------------------
+# Shared pixel-grid helper — cached so multiple terrain functions
+# don't each rebuild the full lon/lat grid.
+# ---------------------------------------------------------------------
+def _pixel_lonlat_grid(elevation_array, dem_bounds):
+    """Returns (pixel_lon_2d, pixel_lat_2d) arrays of pixel centre coords.
+    Cached by (shape, bounds) so repeated calls are free."""
+    west, south, east, north = dem_bounds
+    H, W = elevation_array.shape
+    key = (H, W, west, south, east, north)
+    cache = globals().setdefault("_grid_cache", {})
+    if key not in cache:
+        rows, cols = np.indices((H, W))
+        cache[key] = (
+            west + (cols + 0.5) / W * (east - west),
+            north - (rows + 0.5) / H * (north - south),
+        )
+    return cache[key]
+
+
+# ---------------------------------------------------------------------
+# Circular area lowering — retention ponds, encroachment removal
+# ---------------------------------------------------------------------
+def apply_area_lower(elevation_array, dem_bounds, center_lon, center_lat,
+                     radius_m, depth_m):
+    """Returns a MODIFIED COPY with a circular area lowered by depth_m.
+    Inverse of a (circular) raise — models digging a retention pond or
+    restoring ground level where an encroachment was removed.
+
+    Sub-pixel guard: if the footprint is smaller than one pixel (e.g. a
+    single removed building at ~30m DEM resolution), snaps to the nearest
+    pixel and scales depth by the real area ratio so the volume is
+    conserved and the effect is honestly small, not silently zero."""
+    west, south, east, north = dem_bounds
+    H, W = elevation_array.shape
+    modified = elevation_array.copy()
+
+    lat_mid = (north + south) / 2
+    m_per_deg_lat = 111320
+    m_per_deg_lon = 111320 * np.cos(np.radians(lat_mid))
+    radius_deg_lat = radius_m / m_per_deg_lat
+    radius_deg_lon = radius_m / m_per_deg_lon
+
+    pixel_lon, pixel_lat = _pixel_lonlat_grid(elevation_array, dem_bounds)
+
+    dx = (pixel_lon - center_lon) / radius_deg_lon
+    dy = (pixel_lat - center_lat) / radius_deg_lat
+    dist_sq = dx * dx + dy * dy
+    mask = dist_sq <= 1.0
+
+    if not mask.any():
+        idx = np.unravel_index(np.argmin(dist_sq), dist_sq.shape)
+        footprint_m2 = np.pi * radius_m ** 2
+        effective_depth = depth_m * min(1.0, footprint_m2 / PIXEL_AREA_M2)
+        modified[idx] -= effective_depth
+    else:
+        modified[mask] -= depth_m
+
+    floor = float(np.nanmin(elevation_array)) - 5.0
+    np.maximum(modified, floor, out=modified, where=~np.isnan(modified))
+    return modified
+
+
+# ---------------------------------------------------------------------
+# Line-based lowering — widen channel (excavating banks alongside)
+# ---------------------------------------------------------------------
+def apply_line_lower(elevation_array, dem_bounds, line_coords, depth_m,
+                     buffer_m=8):
+    """Same geometry as apply_line_raise, but LOWERS elevation — models
+    widening a channel section by excavating the banks alongside it."""
+    west, south, east, north = dem_bounds
+    H, W = elevation_array.shape
+    modified = elevation_array.copy()
+
+    lat_mid = (north + south) / 2
+    m_per_deg_lat = 111320
+    m_per_deg_lon = 111320 * np.cos(np.radians(lat_mid))
+    buffer_deg_lat = buffer_m / m_per_deg_lat
+    buffer_deg_lon = buffer_m / m_per_deg_lon
+
+    pixel_lon, pixel_lat = _pixel_lonlat_grid(elevation_array, dem_bounds)
+
+    near_line = np.zeros((H, W), dtype=bool)
+    for i in range(len(line_coords) - 1):
+        lon1, lat1 = line_coords[i]
+        lon2, lat2 = line_coords[i + 1]
+
+        x1, y1 = lon1 / buffer_deg_lon, lat1 / buffer_deg_lat
+        x2, y2 = lon2 / buffer_deg_lon, lat2 / buffer_deg_lat
+        px, py = pixel_lon / buffer_deg_lon, pixel_lat / buffer_deg_lat
+
+        dx, dy = x2 - x1, y2 - y1
+        seg_len_sq = dx * dx + dy * dy
+        if seg_len_sq == 0:
+            dist = np.sqrt((px - x1) ** 2 + (py - y1) ** 2)
+        else:
+            t = np.clip(((px - x1) * dx + (py - y1) * dy) / seg_len_sq, 0, 1)
+            closest_x = x1 + t * dx
+            closest_y = y1 + t * dy
+            dist = np.sqrt((px - closest_x) ** 2 + (py - closest_y) ** 2)
+
+        near_line |= (dist <= 1.0)
+
+    modified[near_line] -= depth_m
+
+    floor = float(np.nanmin(elevation_array)) - 5.0
+    np.maximum(modified, floor, out=modified, where=~np.isnan(modified))
+    return modified
+
+
+# ---------------------------------------------------------------------
+# Combine all terrain actions — max/min to prevent double-counting
+# ---------------------------------------------------------------------
+def apply_all_terrain_actions(elevation, dem_bounds, embankments, ponds,
+                              widen_actions, encroachments):
+    """Combines every terrain-changing action into ONE modified DEM.
+    Uses np.maximum for raises and np.minimum for lowers so overlapping
+    actions never stack — the strongest single intervention at each pixel
+    wins, which is physically correct (two walls on the same spot don't
+    make a taller wall).
+
+    Returns (modified_elevation, meta) where meta records sub-pixel
+    actions and pixel counts for the report."""
+    raise_delta = np.zeros_like(elevation)
+    lower_delta = np.zeros_like(elevation)
+    subpixel_actions = []
+
+    for e in embankments:
+        candidate = apply_line_raise(elevation, dem_bounds,
+                                     e['line_coords'], e['height_m'])
+        delta = candidate - elevation
+        np.maximum(raise_delta, delta, out=raise_delta)
+
+    for p in ponds:
+        candidate = apply_area_lower(elevation, dem_bounds,
+                                     p['lon'], p['lat'],
+                                     p['radius_m'], p['depth_m'])
+        delta = elevation - candidate
+        np.maximum(lower_delta, delta, out=lower_delta)
+        footprint_m2 = np.pi * p['radius_m'] ** 2
+        if footprint_m2 < PIXEL_AREA_M2:
+            subpixel_actions.append({'type': 'retention_pond', 'uid': p.get('uid'),
+                                     'footprint_m2': round(footprint_m2, 1)})
+
+    for w in widen_actions:
+        candidate = apply_line_lower(elevation, dem_bounds,
+                                     w['line_coords'], w['depth_m'],
+                                     buffer_m=w.get('buffer_m', 8))
+        delta = elevation - candidate
+        np.maximum(lower_delta, delta, out=lower_delta)
+
+    for r in encroachments:
+        candidate = apply_area_lower(elevation, dem_bounds,
+                                     r['lon'], r['lat'],
+                                     r['radius_m'], r['depth_m'])
+        delta = elevation - candidate
+        np.maximum(lower_delta, delta, out=lower_delta)
+        footprint_m2 = np.pi * r['radius_m'] ** 2
+        if footprint_m2 < PIXEL_AREA_M2:
+            subpixel_actions.append({'type': 'remove_encroachment', 'uid': r.get('uid'),
+                                     'footprint_m2': round(footprint_m2, 1)})
+
+    modified = elevation + raise_delta - lower_delta
+
+    meta = {
+        'pixels_raised': int(np.sum(raise_delta > 0)),
+        'pixels_lowered': int(np.sum(lower_delta > 0)),
+        'subpixel_actions': subpixel_actions,
+        # Cells deliberately dug for engineered water storage (ponds, a
+        # widened/deepened channel, a restored channel where an
+        # encroachment stood) — see note on engineered_mask below.
+        'engineered_mask': lower_delta > 0,
+    }
+    return modified, meta
+
+
+# ---------------------------------------------------------------------
+# Building centroid helper (mirrors _facility_centroid_lonlat)
+# ---------------------------------------------------------------------
+def _building_centroid_lonlat(feature):
+    geom = feature["geometry"]
+    if geom["type"] == "Point":
+        return geom["coordinates"][0], geom["coordinates"][1]
+    if geom["type"] == "Polygon":
+        ring = geom["coordinates"][0]
+        return (sum(p[0] for p in ring) / len(ring),
+                sum(p[1] for p in ring) / len(ring))
+    if geom["type"] == "MultiPolygon":
+        ring = geom["coordinates"][0][0]
+        return (sum(p[0] for p in ring) / len(ring),
+                sum(p[1] for p in ring) / len(ring))
+    return None
+
+
+# ---------------------------------------------------------------------
+# Count affected buildings on a modified array
+# ---------------------------------------------------------------------
+def count_affected_buildings_on_array(elevation_array, dem_bounds,
+                                      water_level_m):
+    """Array variant of count_affected_buildings — samples the given
+    (possibly modified) elevation array at each building centroid.
+    Both before and after must use THIS function (not the precomputed
+    base_elevation_m variant) to avoid sampling noise masquerading as
+    prevention benefit."""
+    data = load_buildings()
+    count = 0
+    for feature in data["features"]:
+        centroid = _building_centroid_lonlat(feature)
+        if centroid is None:
+            continue
+        lon, lat = centroid
+        elev = sample_elevation_from_array(elevation_array, dem_bounds, lon, lat)
+        if not np.isnan(elev) and elev > -1000 and elev <= water_level_m:
+            count += 1
+    return count
+
+
+# ---------------------------------------------------------------------
+# Depth stats on a modified array
+# ---------------------------------------------------------------------
+def compute_depth_stats_on_array(elevation_array, water_level_m):
+    """Array variant of compute_depth_stats — works on any elevation
+    array including modified terrain."""
+    valid = elevation_array[~np.isnan(elevation_array)]
+    flooded = valid[valid <= water_level_m]
+    if len(flooded) == 0:
+        return {"avg_depth_m": 0.0, "max_depth_m": 0.0}
+    depths = water_level_m - flooded
+    return {
+        "avg_depth_m": round(float(np.mean(depths)), 2),
+        "max_depth_m": round(float(np.max(depths)), 2),
+    }
+
+
+# ---------------------------------------------------------------------
+# CAPACITY SCALING — proportional impact for drainage-improving actions
+# ---------------------------------------------------------------------
+
+import math as _math
+
+_CAPACITY_CEILINGS = {
+    'desilt': 0.10,
+    'clearDrains': 0.08,
+    'greenBuffer': 0.07,
+}
+
+_DEFAULT_RUNOFF_COEFFICIENT = 0.6
+_MIN_RUNOFF_COEFFICIENT = 0.25
+
+
+def load_waterways():
+    """Load waterways.geojson — 215 LineString features, ~71.9km total."""
+    cache_key = "_waterways_cache"
+    if cache_key not in globals() or globals()[cache_key] is None:
+        with open("waterways.geojson", encoding="utf-8") as f:
+            globals()[cache_key] = json.load(f)
+    return globals()[cache_key]
+
+
+def get_total_waterway_length_m(waterways_geojson=None):
+    """Real total channel network length in metres, computed from the
+    actual waterway features. Cached after first call."""
+    cache_key = "_waterway_length_cache"
+    if cache_key in globals() and globals()[cache_key] is not None:
+        return globals()[cache_key]
+
+    if waterways_geojson is None:
+        waterways_geojson = load_waterways()
+
+    total_m = 0.0
+    lat_mid_rad = _math.radians(33.70)
+    cos_lat = _math.cos(lat_mid_rad)
+    for feature in waterways_geojson.get("features", []):
+        geom = feature.get("geometry", {})
+        if geom.get("type") != "LineString":
+            continue
+        coords = geom["coordinates"]
+        for i in range(len(coords) - 1):
+            lon1, lat1 = coords[i]
+            lon2, lat2 = coords[i + 1]
+            dx = (lon2 - lon1) * 111320 * cos_lat
+            dy = (lat2 - lat1) * 111320
+            total_m += _math.sqrt(dx * dx + dy * dy)
+
+    globals()[cache_key] = total_m
+    return total_m
+
+
+def merge_intervals_and_sum(intervals):
+    """Merge overlapping (start, end) intervals and return total covered
+    length. Prevents two overlapping actions on the same reach from
+    double-counting their treated length."""
+    if not intervals:
+        return 0.0
+    intervals = sorted(intervals)
+    merged = [list(intervals[0])]
+    for start, end in intervals[1:]:
+        if start <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], end)
+        else:
+            merged.append([start, end])
+    return sum(end - start for start, end in merged)
+
+
+def _position_along_waterway(target_waterway_id, waterways_geojson):
+    """Compute cumulative distance along a waterway feature in metres."""
+    lat_mid_rad = _math.radians(33.70)
+    cos_lat = _math.cos(lat_mid_rad)
+    for feature in waterways_geojson.get("features", []):
+        fid = feature.get("id") or feature.get("properties", {}).get("id")
+        if fid != target_waterway_id:
+            continue
+        coords = feature["geometry"]["coordinates"]
+        cumulative = [0.0]
+        for i in range(len(coords) - 1):
+            lon1, lat1 = coords[i]
+            lon2, lat2 = coords[i + 1]
+            dx = (lon2 - lon1) * 111320 * cos_lat
+            dy = (lat2 - lat1) * 111320
+            seg = _math.sqrt(dx * dx + dy * dy)
+            cumulative.append(cumulative[-1] + seg)
+        return cumulative
+    return None
+
+
+def compute_capacity_gain(capacity_actions, waterways_geojson=None,
+                          cause_type=None):
+    """Compute the real runoff coefficient reduction from capacity-
+    changing actions (desilt, clearDrains, greenBuffer).
+
+    Returns dict with runoff_coefficient_after, treated lengths/fractions,
+    per-type gain breakdown, and whether this cause type uses the model."""
+    if waterways_geojson is None:
+        waterways_geojson = load_waterways()
+
+    total_length_m = get_total_waterway_length_m(waterways_geojson)
+    volume_causes = {"rainfall", "drainage_failure"}
+    applies = cause_type in volume_causes if cause_type else True
+
+    intervals_by_type = {}
+    green_areas = []
+
+    for action in capacity_actions:
+        atype = action.get("type", "")
+        params = action.get("params", {})
+        wid = action.get("target_waterway_id")
+
+        if atype == "greenBuffer":
+            area = float(params.get("area", 0) or
+                         float(params.get("bufferWidth", 10)) *
+                         float(params.get("length", 50)))
+            green_areas.append(area)
+            continue
+
+        length = float(params.get("length", 0) or
+                       params.get("sectionLength", 0) or 0)
+        if length <= 0 or wid is None:
+            continue
+
+        cumulative = _position_along_waterway(wid, waterways_geojson)
+        if cumulative is None:
+            intervals_by_type.setdefault(atype, []).append((0, length))
+        else:
+            total_w_len = cumulative[-1]
+            anchor_dist = total_w_len * 0.5
+            start_m = max(0, anchor_dist - length / 2)
+            end_m = min(total_w_len, anchor_dist + length / 2)
+            intervals_by_type.setdefault(atype, []).append((start_m, end_m))
+
+    per_type_gain = {}
+    total_gain = 0.0
+    total_treated_m = 0.0
+
+    for atype, intervals in intervals_by_type.items():
+        merged_length = merge_intervals_and_sum(intervals)
+        total_treated_m += merged_length
+        fraction = min(1.0, merged_length / total_length_m) if total_length_m > 0 else 0
+        ceiling = _CAPACITY_CEILINGS.get(atype, 0)
+        gain = ceiling * fraction
+        per_type_gain[atype] = {
+            "treated_length_m": round(merged_length, 1),
+            "fraction": round(fraction, 6),
+            "gain": round(gain, 6),
+        }
+        total_gain += gain
+
+    if green_areas:
+        total_green_area = sum(green_areas)
+        reference_area = total_length_m * 40
+        fraction = min(1.0, total_green_area / reference_area) if reference_area > 0 else 0
+        ceiling = _CAPACITY_CEILINGS.get("greenBuffer", 0)
+        gain = ceiling * fraction
+        per_type_gain["greenBuffer"] = {
+            "treated_area_m2": round(total_green_area, 1),
+            "reference_area_m2": round(reference_area, 1),
+            "fraction": round(fraction, 6),
+            "gain": round(gain, 6),
+        }
+        total_gain += gain
+
+    runoff_after = max(_MIN_RUNOFF_COEFFICIENT,
+                        _DEFAULT_RUNOFF_COEFFICIENT - total_gain)
+
+    return {
+        "runoff_coefficient_after": round(runoff_after, 4),
+        "total_treated_length_m": round(total_treated_m, 1),
+        "total_waterway_length_m": round(total_length_m, 1),
+        "treated_fraction": round(total_treated_m / total_length_m, 6) if total_length_m > 0 else 0,
+        "capacity_gain_pct": round(total_gain, 6),
+        "applies_to_cause": applies,
+        "per_type_gain": per_type_gain,
+    }
+
+
+# Islamabad nullah tributaries (Lai Nadi, smaller nullahs): typically 4-6m
+# wide, 1.2m deep. Nullah Leh main channel is wider (~10m) but most
+# widenChannel placements target the smaller tributaries.
+BASELINE_WIDTH_M = 4.0
+BASELINE_DEPTH_M = 1.2
+ENCROACHMENT_SECTION_LENGTH_M = 50.0
+ENCROACHMENT_WIDTH_GAIN_M = 3.0  # typical encroachment removal restores ~3m width
+
+
+def _pond_volume_m3(p):
+    """Retention pond: stores surface_area × depth m³ of floodwater that
+    would otherwise spread across the floodplain — direct volume
+    interception, it never reaches the main flood zone."""
+    area_m2 = _math.pi * p['radius_m'] ** 2
+    return area_m2 * p['depth_m']
+
+
+def _widen_section_length_m(w):
+    if w.get('line_coords'):
+        coords = w['line_coords']
+        cos_lat = _math.cos(_math.radians(33.70))
+        length = 0.0
+        for i in range(len(coords) - 1):
+            dx = (coords[i + 1][0] - coords[i][0]) * 111320 * cos_lat
+            dy = (coords[i + 1][1] - coords[i][1]) * 111320
+            length += _math.sqrt(dx * dx + dy * dy)
+        if length > 1.0:
+            return length
+    return 50.0
+
+
+def _widen_volume_m3(w):
+    """Channel widening (Manning's conveyance): the original Nullah Leh
+    main channel is ~8-12m wide, 1.5m deep, slope ~0.002 m/m, Manning
+    n≈0.04 (concrete-lined urban nullah). A wider channel holds more
+    water within its banks — the extra volume that fits in the widened
+    section without spilling into the floodplain is
+    (new_width - baseline_width) × channel_depth × section_length."""
+    new_width = w.get('buffer_m', 4) * 2  # buffer_m is half the new width
+    section_length_m = _widen_section_length_m(w)
+    width_gain = max(0.0, new_width - BASELINE_WIDTH_M)
+    return width_gain * BASELINE_DEPTH_M * section_length_m
+
+
+def _encroachment_volume_m3():
+    """Remove encroachment: equivalent to restoring ~3m of channel width
+    over the encroachment footprint, same conveyance physics."""
+    return ENCROACHMENT_WIDTH_GAIN_M * BASELINE_DEPTH_M * ENCROACHMENT_SECTION_LENGTH_M
+
+
+def compute_structural_volume_reduction(ponds, widen_actions, encroachments,
+                                        cause_type=None):
+    """
+    REAL FLOOD ENGINEERING PHYSICS for structural interventions — total
+    volume across all placed ponds, widened sections and removed
+    encroachments. See _pond_volume_m3 / _widen_volume_m3 /
+    _encroachment_volume_m3 for the per-action formulas (also used by
+    apply_local_protection to place this volume's benefit correctly).
+
+    All causes benefit from structural volume reduction — drained fast or
+    stored offline, the total ponding volume in the floodplain is reduced.
+    """
+    total_volume_m3 = 0.0
+    total_volume_m3 += sum(_pond_volume_m3(p) for p in ponds)
+    total_volume_m3 += sum(_widen_volume_m3(w) for w in widen_actions)
+    total_volume_m3 += len(encroachments) * _encroachment_volume_m3()
+    return total_volume_m3
+
+
+# ---------------------------------------------------------------------
+# LOCAL PROTECTION — river overflow / dam release
+# ---------------------------------------------------------------------
+def _distance_m_from_point(elevation_array, dem_bounds, center_lon, center_lat):
+    """Real-world distance (metres) of every DEM pixel from a point."""
+    west, south, east, north = dem_bounds
+    lat_mid = (north + south) / 2
+    m_per_deg_lat = 111320
+    m_per_deg_lon = 111320 * np.cos(np.radians(lat_mid))
+    pixel_lon, pixel_lat = _pixel_lonlat_grid(elevation_array, dem_bounds)
+    dx = (pixel_lon - center_lon) * m_per_deg_lon
+    dy = (pixel_lat - center_lat) * m_per_deg_lat
+    return np.sqrt(dx * dx + dy * dy)
+
+
+def _distance_m_from_line(elevation_array, dem_bounds, line_coords):
+    """Real-world distance (metres) of every DEM pixel from a polyline."""
+    west, south, east, north = dem_bounds
+    lat_mid = (north + south) / 2
+    m_per_deg_lat = 111320
+    m_per_deg_lon = 111320 * np.cos(np.radians(lat_mid))
+    pixel_lon, pixel_lat = _pixel_lonlat_grid(elevation_array, dem_bounds)
+    px_m, py_m = pixel_lon * m_per_deg_lon, pixel_lat * m_per_deg_lat
+
+    best = None
+    for i in range(len(line_coords) - 1):
+        lon1, lat1 = line_coords[i]
+        lon2, lat2 = line_coords[i + 1]
+        x1, y1 = lon1 * m_per_deg_lon, lat1 * m_per_deg_lat
+        x2, y2 = lon2 * m_per_deg_lon, lat2 * m_per_deg_lat
+        dx, dy = x2 - x1, y2 - y1
+        seg_len_sq = dx * dx + dy * dy
+        if seg_len_sq == 0:
+            dist = np.sqrt((px_m - x1) ** 2 + (py_m - y1) ** 2)
+        else:
+            t = np.clip(((px_m - x1) * dx + (py_m - y1) * dy) / seg_len_sq, 0, 1)
+            closest_x = x1 + t * dx
+            closest_y = y1 + t * dy
+            dist = np.sqrt((px_m - closest_x) ** 2 + (py_m - closest_y) ** 2)
+        best = dist if best is None else np.minimum(best, dist)
+    return best
+
+
+def apply_local_protection(elevation_array, dem_bounds, ponds, widen_actions, encroachments):
+    """
+    LOCAL PROTECTION MODEL for level-driven floods (river overflow, dam
+    release).
+
+    A retention pond or a widened 50m channel section cannot lower an
+    entire river's flood stage — that water is arriving from far outside
+    this DEM. What it CAN honestly do is intercept the water that would
+    otherwise reach ITS OWN immediate surroundings before that water adds
+    to local flood depth there. We model that as a raised "effective
+    ground" covering the intervention's real local service area, sized so
+    the total volume it represents matches the actual intercepted volume
+    computed in _pond_volume_m3 / _widen_volume_m3 / _encroachment_volume_m3
+    — the same physics, just spent locally instead of diluted across the
+    whole study area (which is what made every action look like it did
+    nothing).
+
+    Returns a per-pixel metres-of-protection array, meant to be ADDED to
+    the modified elevation array before computing the "after" flood extent
+    — identical in spirit to how an embankment's raised terrain already
+    works, just sized from volume instead of a fixed height.
+    """
+    protection = np.zeros_like(elevation_array)
+
+    # Base local service radius: matches the placement rules the frontend
+    # already enforces for these tools (ponds sit 10-100m from the nullah,
+    # encroachment removals within 15m of it) — these are neighbourhood-
+    # block-scale interventions, not city-scale ones.
+    BASE_RADIUS_M = 40.0
+
+    for p in ponds:
+        stored_m3 = _pond_volume_m3(p)
+        if stored_m3 <= 0:
+            continue
+        # Bigger ponds earn a bigger service radius (a real reservoir
+        # protects more ground than a small detention pond), but even the
+        # smallest pond gets the same base neighbourhood radius.
+        influence_radius_m = max(BASE_RADIUS_M, 2.5 * p['radius_m'])
+        zone_area_m2 = _math.pi * influence_radius_m ** 2
+        depth_reduction_m = stored_m3 / zone_area_m2
+        dist = _distance_m_from_point(elevation_array, dem_bounds, p['lon'], p['lat'])
+        np.maximum(protection, np.where(dist <= influence_radius_m, depth_reduction_m, 0.0), out=protection)
+
+    for w in widen_actions:
+        extra_vol = _widen_volume_m3(w)
+        if extra_vol <= 0 or not w.get('line_coords'):
+            continue
+        section_length_m = _widen_section_length_m(w)
+        influence_buffer_m = BASE_RADIUS_M  # floodplain directly served by this reach
+        zone_area_m2 = 2 * influence_buffer_m * section_length_m
+        depth_reduction_m = extra_vol / zone_area_m2
+        dist = _distance_m_from_line(elevation_array, dem_bounds, w['line_coords'])
+        np.maximum(protection, np.where(dist <= influence_buffer_m, depth_reduction_m, 0.0), out=protection)
+
+    for r in encroachments:
+        extra_vol = _encroachment_volume_m3()
+        influence_radius_m = BASE_RADIUS_M
+        zone_area_m2 = _math.pi * influence_radius_m ** 2
+        depth_reduction_m = extra_vol / zone_area_m2
+        dist = _distance_m_from_point(elevation_array, dem_bounds, r['lon'], r['lat'])
+        np.maximum(protection, np.where(dist <= influence_radius_m, depth_reduction_m, 0.0), out=protection)
+
+    return protection

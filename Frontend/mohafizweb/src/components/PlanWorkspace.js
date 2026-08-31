@@ -5,8 +5,9 @@ import { useRouter } from 'next/navigation';
 import * as maplibregl from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import * as turf from '@turf/turf';
+import { deriveImpact, formatFloodPctDelta } from '@/lib/impactFormat';
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000';
+const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8002';
 
 const SCENARIO_META = {
   rainfall:         { emoji: '🌧️', label: 'Rainfall',         color: '#0EA5E9', description: 'Surface runoff from heavy rain' },
@@ -733,7 +734,7 @@ const DAM_RELEASE_RESPONSE_TOOLS = [
 const PREVENTION_TOOLS = [
   {
     key: 'desilt',
-    label: 'Desilt nullah section',
+    label: 'Desilt Nullah',
     causeTypes: ['rainfall', 'drainage_failure'],
     emoji: '🪣',
     color: '#0891b2',
@@ -751,7 +752,7 @@ const PREVENTION_TOOLS = [
   },
   {
     key: 'clearDrains',
-    label: 'Clear blocked drains',
+    label: 'Unblock Drain',
     causeTypes: ['rainfall', 'drainage_failure'],
     emoji: '🕳️',
     color: '#f59e0b',
@@ -768,7 +769,7 @@ const PREVENTION_TOOLS = [
   },
   {
     key: 'embankment',
-    label: 'Build / raise embankment',
+    label: 'Raise Protective Bank',
     causeTypes: ['river_overflow', 'dam_release'],
     emoji: '🧱',
     color: '#78350f',
@@ -797,7 +798,7 @@ const PREVENTION_TOOLS = [
   },
   {
     key: 'widenChannel',
-    label: 'Widen channel section',
+    label: 'Widen Waterway',
     causeTypes: ['rainfall', 'river_overflow', 'drainage_failure'],
     emoji: '📏',
     color: '#0284c7',
@@ -814,13 +815,13 @@ const PREVENTION_TOOLS = [
       requireNoBuildingNearby: 10,
     },
     formFields: [
-      { key: 'newWidth', label: 'New channel width', type: 'number', min: 3, max: 30, step: 0.5, unit: 'm', default: 8 },
-      { key: 'length', label: 'Section length', type: 'number', min: 10, max: 300, step: 10, unit: 'm', default: 50 },
+      { key: 'newWidth', label: 'New channel width', type: 'number', min: 3, max: 40, step: 0.5, unit: 'm', default: 15 },
+      { key: 'length', label: 'Section length', type: 'number', min: 10, max: 500, step: 10, unit: 'm', default: 100 },
     ],
   },
   {
     key: 'removeEncroachment',
-    label: 'Remove encroachment',
+    label: 'Clear Blocking Structure',
     causeTypes: ['river_overflow', 'dam_release'],
     emoji: '🏚️',
     color: '#b91c1c',
@@ -841,7 +842,7 @@ const PREVENTION_TOOLS = [
   },
   {
     key: 'retentionPond',
-    label: 'Retention pond',
+    label: 'Water Storage Pond',
     causeTypes: ['rainfall', 'river_overflow', 'drainage_failure', 'dam_release'],
     emoji: '🌊',
     color: '#0d9488',
@@ -859,13 +860,13 @@ const PREVENTION_TOOLS = [
       checkExistingWater: true,
     },
     formFields: [
-      { key: 'area', label: 'Surface area', type: 'number', min: 100, max: 50000, step: 50, unit: 'm²', default: 2000 },
-      { key: 'depth', label: 'Depth', type: 'number', min: 0.5, max: 6, step: 0.1, unit: 'm', default: 2 },
+      { key: 'area', label: 'Surface area', type: 'number', min: 500, max: 200000, step: 500, unit: 'm²', default: 10000 },
+      { key: 'depth', label: 'Depth', type: 'number', min: 0.5, max: 8, step: 0.5, unit: 'm', default: 3 },
     ],
   },
   {
     key: 'warningGauge',
-    label: 'Community alert point',
+    label: 'Flood Alert Sensor',
     causeTypes: ['river_overflow', 'drainage_failure', 'dam_release'],
     emoji: '🔊',
     color: '#7c3aed',
@@ -888,7 +889,7 @@ const PREVENTION_TOOLS = [
   },
   {
     key: 'greenBuffer',
-    label: 'Green buffer / plantation',
+    label: 'Tree Buffer Zone',
     causeTypes: ['rainfall', 'river_overflow', 'dam_release'],
     emoji: '🌳',
     color: '#16a34a',
@@ -962,6 +963,50 @@ const EMBANKMENT_MIN_DISTANCE_M = 5;
 const EMBANKMENT_MAX_DISTANCE_M = 50;
 const EMBANKMENT_ROAD_BUFFER_M = 15;
 const EMBANKMENT_SAMPLE_INTERVAL_M = 5;
+
+// ---------------------------------------------------------------------
+// Minimum distance from a point to any feature geometry.
+// pointToLineDistance only accepts LineString/MultiLineString, so we
+// convert polygon boundaries to lines first.
+// ---------------------------------------------------------------------
+function pointToFeatureDistance(pt, feature) {
+  var geomType = feature.geometry && feature.geometry.type;
+  if (geomType === 'Point') {
+    return turf.distance(pt, feature, { units: 'meters' });
+  }
+  if (geomType === 'Polygon' || geomType === 'MultiPolygon') {
+    var lines = turf.polygonToLine(feature);
+    var lineArr = lines.type === 'FeatureCollection' ? lines.features : [lines];
+    var minDist = Infinity;
+    for (var i = 0; i < lineArr.length; i++) {
+      var lineGeom = lineArr[i].geometry && lineArr[i].geometry.type;
+      if (lineGeom === 'MultiLineString') {
+        var coords = lineArr[i].geometry.coordinates;
+        for (var j = 0; j < coords.length; j++) {
+          var d = turf.pointToLineDistance(pt, turf.lineString(coords[j]), { units: 'meters' });
+          if (d < minDist) minDist = d;
+        }
+      } else if (lineGeom === 'LineString') {
+        var d2 = turf.pointToLineDistance(pt, lineArr[i], { units: 'meters' });
+        if (d2 < minDist) minDist = d2;
+      }
+    }
+    return minDist;
+  }
+  if (geomType === 'LineString') {
+    return turf.pointToLineDistance(pt, feature, { units: 'meters' });
+  }
+  if (geomType === 'MultiLineString') {
+    var mlCoords = feature.geometry.coordinates;
+    var mlMin = Infinity;
+    for (var k = 0; k < mlCoords.length; k++) {
+      var d3 = turf.pointToLineDistance(pt, turf.lineString(mlCoords[k]), { units: 'meters' });
+      if (d3 < mlMin) mlMin = d3;
+    }
+    return mlMin;
+  }
+  return Infinity;
+}
 
 // ---------------------------------------------------------------------
 // Generalized placement validation for prevention actions.
@@ -1063,9 +1108,9 @@ function validatePlacement(lngLat, config, geoData) {
           return { ok: false, reason: 'has a building only ' + Math.round(distance) + 'm away — no room to widen without demolition' };
         }
       } else if (geomType === 'Polygon' || geomType === 'MultiPolygon') {
-        const distance = turf.pointToLineDistance(clickPoint, feature, { units: 'meters' });
-        if (distance < config.requireNoBuildingNearby) {
-          return { ok: false, reason: 'has a building only ' + Math.round(distance) + 'm away — no room to widen without demolition' };
+        var minDist = pointToFeatureDistance(clickPoint, feature);
+        if (minDist < config.requireNoBuildingNearby) {
+          return { ok: false, reason: 'has a building only ' + Math.round(minDist) + 'm away — no room to widen without demolition' };
         }
       }
     }
@@ -3642,13 +3687,32 @@ function nextUid() { return _nextUid++; }
 
 function buildDefaultForms() {
   const defaults = {};
-  PREVENTION_TOOLS.concat(RESPONSE_TOOLS).concat(RAINFALL_RESPONSE_TOOLS).concat(DRAINAGE_FAILURE_RESPONSE_TOOLS).concat(DAM_RELEASE_RESPONSE_TOOLS).forEach(function (tool) {
+  PREVENTION_TOOLS.concat(RESPONSE_TOOLS).concat(RAINFALL_RESPONSE_TOOLS).concat(DRAINAGE_FAILURE_RESPONSE_TOOLS).concat(DAM_RELEASE_RESPONSE_TOOLS).concat(CUSTOM_ACTIONS).forEach(function (tool) {
     if (!tool.formFields) return;
     const form = {};
-    tool.formFields.forEach(function (f) { form[f.key] = f.default; });
+    tool.formFields.forEach(function (f) { if (f.default !== undefined) form[f.key] = f.default; });
     defaults[tool.key] = form;
   });
   return defaults;
+}
+
+function validateFormFields(forms, toolDef) {
+  if (!toolDef || !toolDef.formFields) return null;
+  for (var i = 0; i < toolDef.formFields.length; i++) {
+    var f = toolDef.formFields[i];
+    if (f.type !== 'number') continue;
+    var val = Number(forms[f.key]);
+    if (isNaN(val) || val <= 0) {
+      return 'Enter a positive ' + f.label.toLowerCase() + ' before continuing.';
+    }
+    if (f.min !== undefined && val < f.min) {
+      return f.label + ' must be at least ' + f.min + (f.unit ? ' ' + f.unit : '') + '.';
+    }
+    if (f.max !== undefined && val > f.max) {
+      return f.label + ' must be at most ' + f.max + (f.unit ? ' ' + f.unit : '') + '.';
+    }
+  }
+  return null;
 }
 
 function resolvePlacement(lngLat, toolDef, geoData) {
@@ -3800,11 +3864,11 @@ function formatParams(toolDef, params) {
 
 const ACTION_SYNONYMS = {
   // Existing prevention tools
-  desilt: ['desilt', 'mud', 'sediment', 'silt', 'dredge', 'dig', 'excavate'],
+  desilt: ['desilt', 'mud', 'sediment', 'silt', 'dredge', 'dig', 'excavate', 'clean waterway', 'waterway bed'],
   clearDrains: ['drain', 'blocked', 'clear', 'unclog', 'choke', 'debris', 'clean drain'],
-  embankment: ['embankment', 'levee', 'raise bank', 'bund', 'barrier along'],
+  embankment: ['embankment', 'levee', 'raise bank', 'protective bank', 'bund', 'barrier along'],
   widenChannel: ['widen', 'broaden', 'expand channel', 'narrow', 'channel width'],
-  removeEncroachment: ['encroachment', 'illegal', 'demolish', 'structure blocking', 'remove building'],
+  removeEncroachment: ['encroachment', 'illegal', 'demolish', 'structure blocking', 'blocking structure', 'remove building'],
   retentionPond: ['pond', 'reservoir', 'storage', 'detention', 'retention', 'hold water'],
   warningGauge: ['warning', 'alert', 'siren', 'monitor', 'loudspeaker', 'warn', 'announce'],
   greenBuffer: ['green', 'tree', 'plant', 'vegetation', 'buffer', 'mangrove', 'plantation'],
@@ -3907,7 +3971,7 @@ var CUSTOM_ACTION_TOOL = {
 var CUSTOM_ACTIONS = [
   {
     key: 'raiseRoad',
-    label: 'Raise road',
+    label: 'Raise Road Level',
     causeTypes: ['rainfall', 'drainage_failure', 'dam_release'],
     emoji: '🛣️',
     color: '#d97706',
@@ -4231,6 +4295,12 @@ export default function PlanWorkspace() {
   // Bumped to re-run the hospital access sweep on demand.
   const [accessCheckToken, setAccessCheckToken] = useState(0);
   const [sweepClosureCount, setSweepClosureCount] = useState(0);
+  const [preventionResult, setPreventionResult] = useState(null);
+  const [preventionLoading, setPreventionLoading] = useState(false);
+  const [preventionError, setPreventionError] = useState(null);
+  const [breakdownResult, setBreakdownResult] = useState(null);
+  const [breakdownLoading, setBreakdownLoading] = useState(false);
+  const [showBreakdown, setShowBreakdown] = useState(false);
 
   const activeToolRef = useRef(null);
   const planTypeRef = useRef('response');
@@ -4240,10 +4310,179 @@ export default function PlanWorkspace() {
   const closedRoadsRef = useRef([]);
   useEffect(() => { markersRef.current = markers; }, [markers]);
   useEffect(() => { closedRoadsRef.current = closedRoads; }, [closedRoads]);
+  const lastActionsRef = useRef([]);
+  const beforeMapRef = useRef(null);
+  const afterMapRef = useRef(null);
+  const beforeMapContainer = useRef(null);
+  const afterMapContainer = useRef(null);
+  const breakdownMapRefs = useRef([]);
+  const breakdownMapContainers = useRef([]);
+  const breakdownAfterMapRefs = useRef([]);
+  const breakdownAfterMapContainers = useRef([]);
   useEffect(() => { activeToolRef.current = activeTool; }, [activeTool]);
   useEffect(() => { planTypeRef.current = planType; }, [planType]);
   useEffect(() => { startPointRef.current = startPoint; }, [startPoint]);
   useEffect(() => { pendingCustomActionRef.current = pendingCustomAction; }, [pendingCustomAction]);
+
+  // Stage 1: mount before/after comparison maps when preventionResult arrives
+  useEffect(() => {
+    if (!preventionResult) {
+      if (beforeMapRef.current) { beforeMapRef.current.remove(); beforeMapRef.current = null; }
+      if (afterMapRef.current) { afterMapRef.current.remove(); afterMapRef.current = null; }
+      return;
+    }
+    if (!beforeMapContainer.current || !afterMapContainer.current) return;
+
+    // Frame the thumbnail around the REAL flooded area, not just the
+    // placed actions — zooming tightly to a small action cluster can crop
+    // into one uniformly-flooded patch of a much larger flood and render
+    // as a solid color block with no visible street detail (the image is
+    // fine; only the camera was wrong). Widen that box to also include
+    // every action's coordinates so placed markers stay in frame.
+    var actions = lastActionsRef.current;
+    var lons = [], lats = [];
+    actions.forEach(function (a) {
+      if (a.lat != null && a.lon != null) { lats.push(a.lat); lons.push(a.lon); }
+      if (a.line_coords) { a.line_coords.forEach(function (c) { lons.push(c[0]); lats.push(c[1]); }); }
+    });
+    var pad = 0.005;
+    var fb = preventionResult.flood_image_bounds;
+    var floodedBbox = preventionResult.before && preventionResult.before.flooded_bbox;
+    var w, s, e, n;
+    if (floodedBbox) {
+      w = floodedBbox[0]; s = floodedBbox[1]; e = floodedBbox[2]; n = floodedBbox[3];
+    } else if (lons.length > 0) {
+      w = Math.min.apply(null, lons) - pad;
+      s = Math.min.apply(null, lats) - pad;
+      e = Math.max.apply(null, lons) + pad;
+      n = Math.max.apply(null, lats) + pad;
+    } else {
+      w = fb[0]; s = fb[1]; e = fb[2]; n = fb[3];
+    }
+    if (lons.length > 0) {
+      w = Math.min(w, Math.min.apply(null, lons) - pad);
+      s = Math.min(s, Math.min.apply(null, lats) - pad);
+      e = Math.max(e, Math.max.apply(null, lons) + pad);
+      n = Math.max(n, Math.max.apply(null, lats) + pad);
+    }
+    var fitBounds = [[w, s], [e, n]];
+    var imgCoords = [[fb[0], fb[3]], [fb[2], fb[3]], [fb[2], fb[1]], [fb[0], fb[1]]];
+    var baseStyle = {
+      version: 8,
+      sources: { 'osm': { type: 'raster', tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'], tileSize: 256, maxzoom: 19, attribution: '© OpenStreetMap contributors' } },
+      layers: [{ id: 'osm-layer', type: 'raster', source: 'osm' }],
+    };
+
+    function makeCompMap(container, imageB64) {
+      if (!container) return null;
+      var m = new maplibregl.Map({ container: container, style: JSON.parse(JSON.stringify(baseStyle)), bounds: fitBounds, fitBoundsOptions: { padding: 20 }, interactive: true });
+      m.on('load', function () {
+        m.addSource('flood-compare', { type: 'image', url: imageB64, coordinates: imgCoords });
+        m.addLayer({ id: 'flood-compare-layer', type: 'raster', source: 'flood-compare', paint: { 'raster-opacity': 0.82 } });
+      });
+      return m;
+    }
+
+    if (beforeMapRef.current) { beforeMapRef.current.remove(); beforeMapRef.current = null; }
+    if (afterMapRef.current) { afterMapRef.current.remove(); afterMapRef.current = null; }
+
+    var bm = makeCompMap(beforeMapContainer.current, preventionResult.flood_image_before);
+    var am = makeCompMap(afterMapContainer.current, preventionResult.flood_image_after);
+    beforeMapRef.current = bm;
+    afterMapRef.current = am;
+
+    // Camera sync
+    var syncing = false;
+    if (bm && am) {
+      bm.on('move', function () {
+        if (syncing) return; syncing = true;
+        am.jumpTo({ center: bm.getCenter(), zoom: bm.getZoom(), bearing: bm.getBearing(), pitch: bm.getPitch() });
+        syncing = false;
+      });
+      am.on('move', function () {
+        if (syncing) return; syncing = true;
+        bm.jumpTo({ center: am.getCenter(), zoom: am.getZoom(), bearing: am.getBearing(), pitch: am.getPitch() });
+        syncing = false;
+      });
+    }
+
+    return function () {
+      if (beforeMapRef.current) { beforeMapRef.current.remove(); beforeMapRef.current = null; }
+      if (afterMapRef.current) { afterMapRef.current.remove(); afterMapRef.current = null; }
+    };
+    // showBreakdown is a real dependency, not just a lint requirement: the
+    // container divs below are only rendered when `!showBreakdown`, so they
+    // unmount/remount as it toggles. Without this, returning from the full
+    // report re-creates the container DOM nodes but this effect never
+    // re-runs (preventionResult hasn't changed), leaving the new nodes with
+    // no maplibre map attached — a blank box with no error.
+  }, [preventionResult, showBreakdown]);
+
+  // Stage 2: mount per-action mini maps (before + after) when breakdown is shown
+  useEffect(() => {
+    if (!showBreakdown || !breakdownResult || !preventionResult) {
+      breakdownMapRefs.current.forEach(function (m) { if (m) m.remove(); });
+      breakdownMapRefs.current = [];
+      breakdownAfterMapRefs.current.forEach(function (m) { if (m) m.remove(); });
+      breakdownAfterMapRefs.current = [];
+      return;
+    }
+    var rows = breakdownResult.per_action_breakdown || [];
+    breakdownMapRefs.current.forEach(function (m) { if (m) m.remove(); });
+    breakdownMapRefs.current = [];
+    breakdownAfterMapRefs.current.forEach(function (m) { if (m) m.remove(); });
+    breakdownAfterMapRefs.current = [];
+
+    var fb = preventionResult.flood_image_bounds;
+    var imgCoords = [[fb[0], fb[3]], [fb[2], fb[3]], [fb[2], fb[1]], [fb[0], fb[1]]];
+    var baseStyle = {
+      version: 8,
+      sources: { 'osm': { type: 'raster', tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'], tileSize: 256, maxzoom: 19, attribution: '© OpenStreetMap contributors' } },
+      layers: [{ id: 'osm-layer', type: 'raster', source: 'osm' }],
+    };
+
+    // 500m in degrees (approximate at 33°N)
+    var degPer500m = 0.0045;
+
+    rows.forEach(function (row, i) {
+      var lat = row.lat != null ? row.lat : (lastActionsRef.current[i] && lastActionsRef.current[i].lat);
+      var lon = row.lon != null ? row.lon : (lastActionsRef.current[i] && lastActionsRef.current[i].lon);
+      var fitBounds = (lat != null && lon != null)
+        ? [[lon - degPer500m, lat - degPer500m], [lon + degPer500m, lat + degPer500m]]
+        : [[fb[0], fb[1]], [fb[2], fb[3]]];
+
+      var beforeContainer = breakdownMapContainers.current[i];
+      if (beforeContainer) {
+        var mb = new maplibregl.Map({ container: beforeContainer, style: JSON.parse(JSON.stringify(baseStyle)), bounds: fitBounds, fitBoundsOptions: { padding: 10 }, interactive: false });
+        mb.on('load', function () {
+          mb.addSource('flood-bd-b', { type: 'image', url: preventionResult.flood_image_before, coordinates: imgCoords });
+          mb.addLayer({ id: 'flood-bd-b-layer', type: 'raster', source: 'flood-bd-b', paint: { 'raster-opacity': 0.78 } });
+        });
+        breakdownMapRefs.current[i] = mb;
+      } else {
+        breakdownMapRefs.current[i] = null;
+      }
+
+      var afterContainer = breakdownAfterMapContainers.current[i];
+      if (afterContainer) {
+        var ma = new maplibregl.Map({ container: afterContainer, style: JSON.parse(JSON.stringify(baseStyle)), bounds: fitBounds, fitBoundsOptions: { padding: 10 }, interactive: false });
+        ma.on('load', function () {
+          ma.addSource('flood-bd-a', { type: 'image', url: preventionResult.flood_image_after, coordinates: imgCoords });
+          ma.addLayer({ id: 'flood-bd-a-layer', type: 'raster', source: 'flood-bd-a', paint: { 'raster-opacity': 0.78 } });
+        });
+        breakdownAfterMapRefs.current[i] = ma;
+      } else {
+        breakdownAfterMapRefs.current[i] = null;
+      }
+    });
+
+    return function () {
+      breakdownMapRefs.current.forEach(function (m) { if (m) m.remove(); });
+      breakdownMapRefs.current = [];
+      breakdownAfterMapRefs.current.forEach(function (m) { if (m) m.remove(); });
+      breakdownAfterMapRefs.current = [];
+    };
+  }, [showBreakdown, breakdownResult]);
 
   var causeType = scenario && scenario.cause_type;
   const TOOLS = planType === 'response'
@@ -4987,24 +5226,15 @@ export default function PlanWorkspace() {
         },
       });
 
+      // Source only — no circle layer rendered from it. The persistent
+      // emoji marker (see persistentMarkersRef below) is the single icon
+      // per plan item; a colored circle layer used to render underneath
+      // it too, which duplicated that icon with an unlabelled colour
+      // swatch. The source stays so setData() below keeps working, but
+      // nothing draws from it now.
       map.addSource('plan-markers', {
         type: 'geojson',
         data: { type: 'FeatureCollection', features: [] },
-      });
-      map.addLayer({
-        id: 'plan-markers-layer',
-        type: 'circle',
-        source: 'plan-markers',
-        paint: {
-          'circle-radius': [
-            'case',
-            ['==', ['get', 'markerType'], 'retentionPond'], 18,
-            11,
-          ],
-          'circle-color': ['get', 'color'],
-          'circle-stroke-width': 3,
-          'circle-stroke-color': '#ffffff',
-        },
       });
 
       map.addSource('embankment-lines', {
@@ -5139,6 +5369,18 @@ export default function PlanWorkspace() {
 
       map.on('click', function (ev) {
         const toolKey = activeToolRef.current;
+
+        if (typeof window !== 'undefined' && window.__mohafizDebugMarkers) {
+          // Temporary debug aid — compares the raw click pixel to the
+          // lngLat maplibre resolved it to, so a mismatch between "where
+          // I clicked" and "where the marker ends up" can be isolated to
+          // either this click-to-coordinate step or the later render step.
+          console.log('[click-debug]', {
+            pixel: { x: ev.point.x, y: ev.point.y },
+            lngLat: { lng: ev.lngLat.lng, lat: ev.lngLat.lat },
+            devicePixelRatio: window.devicePixelRatio,
+          });
+        }
 
         if (toolKey === 'setStart') {
           setStartPoint({ lat: ev.lngLat.lat, lon: ev.lngLat.lng });
@@ -5379,7 +5621,10 @@ export default function PlanWorkspace() {
       activeUids[m._uid] = true;
       if (!current[m._uid]) {
         var el = document.createElement('div');
-        el.style.fontSize = '20px';
+        // 1.7x the old 20px — anchor stays 'center' below, which maplibre
+        // implements as a CSS translate(-50%,-50%) on this element, so it
+        // stays correctly centered on [m.lon, m.lat] at any font size.
+        el.style.fontSize = '34px';
         el.style.lineHeight = '1';
         el.style.textAlign = 'center';
         el.style.pointerEvents = 'none';
@@ -5390,25 +5635,27 @@ export default function PlanWorkspace() {
         // Same-type markers dropped on top of each other are fanned out
         // along a spiral and numbered, so the second never hides the
         // first. The offset is display-only — m.lat / m.lon stay exact.
+        // Spread is scaled up to match the larger icon so two 34px emoji
+        // don't still overlap the way two 20px ones would at the old radius.
         if (m.stackIndex) {
           const angle = (m.stackIndex * 137.5) * Math.PI / 180;
-          const spread = 12 + m.stackIndex * 5;
+          const spread = 20 + m.stackIndex * 8;
           el.style.transform = 'translate(' + Math.round(Math.cos(angle) * spread) + 'px, ' +
             Math.round(Math.sin(angle) * spread) + 'px)';
 
           const badge = document.createElement('span');
           badge.textContent = String(m.stackIndex + 1);
           badge.style.position = 'absolute';
-          badge.style.top = '-5px';
-          badge.style.right = '-9px';
-          badge.style.minWidth = '13px';
-          badge.style.padding = '0 3px';
-          badge.style.borderRadius = '7px';
+          badge.style.top = '-6px';
+          badge.style.right = '-11px';
+          badge.style.minWidth = '16px';
+          badge.style.padding = '0 4px';
+          badge.style.borderRadius = '8px';
           badge.style.background = m.color;
           badge.style.color = '#ffffff';
-          badge.style.fontSize = '9px';
+          badge.style.fontSize = '11px';
           badge.style.fontWeight = '800';
-          badge.style.lineHeight = '13px';
+          badge.style.lineHeight = '16px';
           badge.style.textShadow = 'none';
           badge.style.boxShadow = '0 0 0 1.5px #ffffff';
           badge.style.fontFamily = 'system-ui, sans-serif';
@@ -5418,6 +5665,21 @@ export default function PlanWorkspace() {
         current[m._uid] = new maplibregl.Marker({ element: el, anchor: 'center' })
           .setLngLat([m.lon, m.lat])
           .addTo(map);
+
+        if (typeof window !== 'undefined' && window.__mohafizDebugMarkers) {
+          // Temporary debug aid for the click-vs-render investigation —
+          // compares the stored lon/lat against where maplibre actually
+          // painted the element, in screen pixels, after layout settles.
+          setTimeout(function () {
+            var rect = el.getBoundingClientRect();
+            var screenPt = map.project([m.lon, m.lat]);
+            console.log('[marker-debug]', m.type, {
+              storedLonLat: [m.lon, m.lat],
+              mapProjectedPx: { x: screenPt.x, y: screenPt.y },
+              renderedCenterPx: { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 },
+            });
+          }, 0);
+        }
       }
     });
 
@@ -5703,35 +5965,48 @@ export default function PlanWorkspace() {
       || CUSTOM_ACTIONS.find(function (a) { return a.key === toolKey; });
     const forms = actionForms[toolKey] || {};
 
-    // Validate number ranges for all fields. A field marked optional may
-    // be left blank, but if it is filled in it faces exactly the same
-    // checks — 0 and negatives are never accepted.
-    if (toolDef && toolDef.formFields) {
-      for (var i = 0; i < toolDef.formFields.length; i++) {
-        var f = toolDef.formFields[i];
-        if (f.type !== 'number') continue;
-        var raw = forms[f.key];
-        var blank = raw === undefined || raw === null || String(raw).trim() === '';
-        if (blank) {
-          if (f.optional) continue;
-          setToolError('Enter a ' + f.label.toLowerCase() + ' before continuing.');
-          setTimeout(function () { setToolError(null); }, 3500);
+    // Validate number ranges for all fields
+    var validationError = validateFormFields(forms, toolDef);
+    if (validationError) {
+      setToolError(validationError);
+      return;
+    }
+
+    // Overlap detection for waterway actions
+    var waterwayActions = ['desilt', 'clearDrains', 'widenChannel'];
+    if (waterwayActions.indexOf(toolKey) >= 0 && pendingAction.targetWaterwayId) {
+      var newLength = Number(forms.length || forms.sectionLength || 100);
+      var existing = markers.filter(function(m) {
+        return m.type === toolKey && m.planType === 'prevention' &&
+               m.targetWaterwayId === pendingAction.targetWaterwayId;
+      });
+      for (var oi = 0; oi < existing.length; oi++) {
+        var dist = turf.distance(
+          turf.point([pendingAction.lng, pendingAction.lat]),
+          turf.point([existing[oi].lon, existing[oi].lat]),
+          { units: 'meters' }
+        );
+        var existingLen = Number((existing[oi].params && (existing[oi].params.length || existing[oi].params.sectionLength)) || 100);
+        var threshold = (newLength + existingLen) * 0.5;
+        if (dist < threshold) {
+          setToolError('This overlaps an existing ' + toolDef.label.toLowerCase() + ' action ' + Math.round(dist) + 'm away — edit it instead.');
           return;
         }
-        var val = Number(raw);
-        if (!isFinite(val) || val <= 0) {
-          setToolError(f.label + ' must be a number above 0 — 0 and negative values are not accepted.');
-          setTimeout(function () { setToolError(null); }, 3500);
-          return;
-        }
-        if (f.min !== undefined && val < f.min) {
-          setToolError(f.label + ' must be at least ' + f.min + (f.unit ? ' ' + f.unit : '') + '.');
-          setTimeout(function () { setToolError(null); }, 3500);
-          return;
-        }
-        if (f.max !== undefined && val > f.max) {
-          setToolError(f.label + ' must be at most ' + f.max + (f.unit ? ' ' + f.unit : '') + '.');
-          setTimeout(function () { setToolError(null); }, 3500);
+      }
+    }
+
+    // Embankment overlap: check existing embankments for proximity
+    if (toolKey === 'embankment') {
+      var embCheckLen = Number(forms.length || 50);
+      for (var ei = 0; ei < embankments.length; ei++) {
+        var eDist = turf.distance(
+          turf.point([pendingAction.lng, pendingAction.lat]),
+          turf.point([embankments[ei].anchorLng, embankments[ei].anchorLat]),
+          { units: 'meters' }
+        );
+        var eThreshold = (embCheckLen + embankments[ei].lengthM) * 0.5;
+        if (eDist < eThreshold) {
+          setToolError('This overlaps an existing embankment ' + Math.round(eDist) + 'm away — extend it instead.');
           return;
         }
       }
@@ -5825,14 +6100,9 @@ export default function PlanWorkspace() {
         var bFeatures = buildingsDataRef.current.features || [];
         for (var b = 0; b < bFeatures.length; b++) {
           var bg = bFeatures[b].geometry && bFeatures[b].geometry.type;
-          var dist = bg === 'Point'
-            ? turf.distance(clickPt, bFeatures[b], { units: 'meters' })
-            : (bg === 'Polygon' || bg === 'MultiPolygon')
-              ? turf.pointToLineDistance(clickPt, bFeatures[b], { units: 'meters' })
-              : Infinity;
+          var dist = pointToFeatureDistance(clickPt, bFeatures[b]);
           if (dist < halfWidth) {
             setToolError('Widening to ' + newWidth + 'm needs ' + Math.round(halfWidth) + 'm clear on each side, but a building is ' + Math.round(dist) + 'm away.');
-            setTimeout(function () { setToolError(null); }, 5000);
             return;
           }
         }
@@ -5842,41 +6112,52 @@ export default function PlanWorkspace() {
     // Retention pond: footprint check — does the pond radius overlap anything?
     if (toolKey === 'retentionPond') {
       var pondArea = Number(forms.area);
-      if (pondArea && buildingsDataRef.current) {
+      if (pondArea) {
         var pondRadius = Math.sqrt(pondArea / Math.PI);
         var pondPt = turf.point([pendingAction.lng, pendingAction.lat]);
-        var bFeatures = buildingsDataRef.current.features || [];
-        for (var b = 0; b < bFeatures.length; b++) {
-          var bg = bFeatures[b].geometry && bFeatures[b].geometry.type;
-          var dist = bg === 'Point'
-            ? turf.distance(pondPt, bFeatures[b], { units: 'meters' })
-            : (bg === 'Polygon' || bg === 'MultiPolygon')
-              ? turf.pointToLineDistance(pondPt, bFeatures[b], { units: 'meters' })
-              : Infinity;
-          if (dist < pondRadius) {
-            setToolError('A pond with ' + Math.round(pondArea) + ' m\u00B2 area (' + Math.round(pondRadius) + 'm radius) would overlap a building ' + Math.round(dist) + 'm away.');
-            setTimeout(function () { setToolError(null); }, 5000);
-            return;
-          }
-        }
-        if (roadsDataRef.current && roadsDataRef.current.features) {
-          var nearestRoad = turf.nearestPointOnLine(roadsDataRef.current, pondPt, { units: 'meters' });
-          if (nearestRoad.properties.dist < pondRadius) {
-            setToolError('A pond with ' + Math.round(pondArea) + ' m\u00B2 area (' + Math.round(pondRadius) + 'm radius) would overlap a road ' + Math.round(nearestRoad.properties.dist) + 'm away.');
-            setTimeout(function () { setToolError(null); }, 5000);
-            return;
-          }
-        }
-        if (waterBodiesDataRef.current && waterBodiesDataRef.current.features) {
-          for (var w = 0; w < waterBodiesDataRef.current.features.length; w++) {
-            var wFeature = waterBodiesDataRef.current.features[w];
-            var wDist = turf.pointToLineDistance(pondPt, wFeature, { units: 'meters' });
-            if (wDist < pondRadius) {
-              setToolError('A pond with ' + Math.round(pondArea) + ' m\u00B2 area (' + Math.round(pondRadius) + 'm radius) would overlap an existing water body ' + Math.round(wDist) + 'm away.');
-              setTimeout(function () { setToolError(null); }, 5000);
-              return;
+
+        try {
+          if (buildingsDataRef.current) {
+            var bFeatures = buildingsDataRef.current.features || [];
+            for (var b = 0; b < bFeatures.length; b++) {
+              var bg = bFeatures[b].geometry && bFeatures[b].geometry.type;
+              var dist = pointToFeatureDistance(pondPt, bFeatures[b]);
+              if (dist < pondRadius) {
+                setToolError('A pond with ' + Math.round(pondArea) + ' m\u00B2 area (' + Math.round(pondRadius) + 'm radius) would overlap a building ' + Math.round(dist) + 'm away.');
+                return;
+              }
             }
           }
+
+          if (roadsDataRef.current && roadsDataRef.current.features) {
+            var roadFeatures = roadsDataRef.current.features || [];
+            for (var ri = 0; ri < roadFeatures.length; ri++) {
+              var rGeom = roadFeatures[ri].geometry && roadFeatures[ri].geometry.type;
+              if (rGeom !== 'LineString' && rGeom !== 'MultiLineString') continue;
+              var rDist = pointToFeatureDistance(pondPt, roadFeatures[ri]);
+              if (rDist < pondRadius) {
+                setToolError('A pond with ' + Math.round(pondArea) + ' m\u00B2 area (' + Math.round(pondRadius) + 'm radius) would overlap a road ' + Math.round(rDist) + 'm away.');
+                return;
+              }
+            }
+          }
+
+          if (waterBodiesDataRef.current && waterBodiesDataRef.current.features) {
+            for (var w = 0; w < waterBodiesDataRef.current.features.length; w++) {
+              var wFeature = waterBodiesDataRef.current.features[w];
+              var wGeom = wFeature.geometry && wFeature.geometry.type;
+              if (wGeom !== 'Polygon' && wGeom !== 'MultiPolygon' && wGeom !== 'LineString') continue;
+              var wDist = pointToFeatureDistance(pondPt, wFeature);
+              if (wDist < pondRadius) {
+                setToolError('A pond with ' + Math.round(pondArea) + ' m\u00B2 area (' + Math.round(pondRadius) + 'm radius) would overlap an existing water body ' + Math.round(wDist) + 'm away.');
+                return;
+              }
+            }
+          }
+        } catch (pondErr) {
+          console.error('Pond footprint check failed:', pondErr);
+          setToolError('Could not verify pond placement — try a different location.');
+          return;
         }
       }
     }
@@ -6212,11 +6493,35 @@ export default function PlanWorkspace() {
   }
 
   function undoLast() {
+    var currentPlanType = planType;
     setUndoStack(function (prev) {
       if (prev.length === 0) return prev;
-      var last = prev[prev.length - 1];
-      var targetUid = last.uid;
-      switch (last.type) {
+
+      var targetIdx = -1;
+      for (var i = prev.length - 1; i >= 0; i--) {
+        var entry = prev[i];
+        var match = false;
+        switch (entry.type) {
+          case 'marker':
+            match = markers.some(function (m) { return m._uid === entry.uid && m.planType === currentPlanType; });
+            break;
+          case 'embankment':
+            match = embankments.some(function (e) { return e._uid === entry.uid && e.planType === currentPlanType; });
+            break;
+          case 'closedRoad':
+            match = closedRoads.some(function (r) { return r._uid === entry.uid && r.planType === currentPlanType; });
+            break;
+          case 'customNote':
+            match = customNotes.some(function (n) { return n._uid === entry.uid && n.planType === currentPlanType; });
+            break;
+        }
+        if (match) { targetIdx = i; break; }
+      }
+      if (targetIdx < 0) return prev;
+
+      var target = prev[targetIdx];
+      var targetUid = target.uid;
+      switch (target.type) {
         case 'marker':
           setMarkers(function (p) { return p.filter(function (m) { return m._uid !== targetUid; }); });
           break;
@@ -6230,7 +6535,7 @@ export default function PlanWorkspace() {
           setCustomNotes(function (p) { return p.filter(function (n) { return n._uid !== targetUid; }); });
           break;
       }
-      return prev.slice(0, -1);
+      return prev.slice(0, targetIdx).concat(prev.slice(targetIdx + 1));
     });
   }
 
@@ -6240,6 +6545,94 @@ export default function PlanWorkspace() {
     setClosedRoads([]);
     setCustomNotes([]);
     setUndoStack([]);
+    setPreventionResult(null);
+    setBreakdownResult(null);
+    setShowBreakdown(false);
+  }
+
+  function buildPreventionActions() {
+    var prevMarkers = markers.filter(function (m) { return m.planType === 'prevention'; });
+    var prevEmbankments = embankments.filter(function (e) { return e.planType === 'prevention'; });
+    var actions = [];
+    prevMarkers.forEach(function (m) {
+      actions.push({
+        uid: m._uid,
+        type: m.type,
+        lat: m.lat,
+        lon: m.lon,
+        params: m.params || {},
+        target_waterway_id: m.targetWaterwayId || null,
+      });
+    });
+    prevEmbankments.forEach(function (e) {
+      actions.push({
+        uid: e._uid,
+        type: 'embankment',
+        lat: e.anchorLat,
+        lon: e.anchorLng,
+        params: { height: e.heightM, length: e.lengthM, material: e.material },
+        line_coords: e.lineCoords,
+      });
+    });
+    return actions;
+  }
+
+  async function runPreventionSim() {
+    setPreventionLoading(true);
+    setPreventionError(null);
+    setPreventionResult(null);
+    setBreakdownResult(null);
+    setShowBreakdown(false);
+    var scenarioParams = (scenario.params && scenario.params.params) ? scenario.params.params : {};
+    var causeType = (scenario.params && scenario.params.cause_type) ? scenario.params.cause_type : scenario.cause_type;
+    var actions = buildPreventionActions();
+    lastActionsRef.current = actions;
+    try {
+      var res = await fetch(API_URL + '/prevention/simulate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          cause_type: causeType,
+          params: scenarioParams,
+          water_level_m: scenario.water_level_m,
+          actions: actions,
+        }),
+      });
+      var data = await res.json();
+      if (!res.ok) throw new Error(data.detail || 'Simulation failed');
+      setPreventionResult(data);
+    } catch (err) {
+      setPreventionError(err.message);
+    } finally {
+      setPreventionLoading(false);
+    }
+  }
+
+  async function runPreventionBreakdown() {
+    setBreakdownLoading(true);
+    var scenarioParams = (scenario.params && scenario.params.params) ? scenario.params.params : {};
+    var causeType = (scenario.params && scenario.params.cause_type) ? scenario.params.cause_type : scenario.cause_type;
+    var actions = buildPreventionActions();
+    try {
+      var res = await fetch(API_URL + '/prevention/breakdown', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          cause_type: causeType,
+          params: scenarioParams,
+          water_level_m: scenario.water_level_m,
+          actions: actions,
+        }),
+      });
+      var data = await res.json();
+      if (!res.ok) throw new Error(data.detail || 'Breakdown failed');
+      setBreakdownResult(data);
+      setShowBreakdown(true);
+    } catch (err) {
+      setPreventionError(err.message);
+    } finally {
+      setBreakdownLoading(false);
+    }
   }
 
   function handlePrintReport() {
@@ -7122,10 +7515,10 @@ export default function PlanWorkspace() {
               <div style={{ fontSize: 10, color: '#64748b' }}>
                 Try: {(function () {
                   var suggestions = {
-                    rainfall:         '\u201cClear blocked drains\u201d, \u201cBuild a retention pond\u201d, \u201cRaise the road by 1m\u201d',
-                    river_overflow:   '\u201cBuild an embankment\u201d, \u201cRemove encroachment\u201d, \u201cInstall warning gauge\u201d',
-                    drainage_failure: '\u201cDesilt the drain\u201d, \u201cClear blocked drain\u201d, \u201cAdd a drainage channel\u201d',
-                    dam_release:      '\u201cRaise embankments\u201d, \u201cCreate flood storage\u201d, \u201cEarly warning gauge\u201d',
+                    rainfall:         '\u201cUnblock the drain\u201d, \u201cBuild a water storage pond\u201d, \u201cRaise the road by 1m\u201d',
+                    river_overflow:   '\u201cRaise a protective bank\u201d, \u201cClear the blocking structure\u201d, \u201cInstall a flood alert sensor\u201d',
+                    drainage_failure: '\u201cDesilt the nullah\u201d, \u201cUnblock the drain\u201d, \u201cAdd a drainage channel\u201d',
+                    dam_release:      '\u201cRaise protective banks\u201d, \u201cCreate flood storage\u201d, \u201cAdd a flood alert sensor\u201d',
                   };
                   var ct = scenario && scenario.cause_type;
                   return suggestions[ct] || '\u201cRaise the road\u201d, \u201cBuild a drainage channel\u201d, \u201cCreate a flood barrier\u201d';
@@ -7175,6 +7568,40 @@ export default function PlanWorkspace() {
             Clear
           </button>
         </div>
+
+        {planType === 'prevention' && (function () {
+          var prevMarkerCount = markers.filter(function (m) { return m.planType === 'prevention'; }).length;
+          var prevEmbCount = embankments.filter(function (e) { return e.planType === 'prevention'; }).length;
+          var totalActions = prevMarkerCount + prevEmbCount;
+          if (totalActions === 0 && !preventionResult) return null;
+          return (
+            <div style={{ marginTop: 10, borderTop: '1px solid #e2e8f0', paddingTop: 10 }}>
+              <button
+                onClick={runPreventionSim}
+                disabled={preventionLoading}
+                style={{
+                  width: '100%',
+                  padding: '9px',
+                  borderRadius: 10,
+                  border: 'none',
+                  background: 'linear-gradient(135deg, #0d9488, #0f766e)',
+                  color: 'white',
+                  fontSize: 12,
+                  fontWeight: 800,
+                  cursor: 'pointer',
+                  opacity: preventionLoading ? 0.7 : 1,
+                }}
+              >
+                {preventionLoading ? 'Simulating...' : (preventionResult ? 'Re-run Prevention Impact' : 'Apply Prevention (' + totalActions + ' actions)')}
+              </button>
+              {preventionError && (
+                <div style={{ marginTop: 6, fontSize: 10, color: '#dc2626', background: '#fef2f2', padding: 6, borderRadius: 6 }}>
+                  {preventionError}
+                </div>
+              )}
+            </div>
+          );
+        })()}
       </div>
 
       <div
@@ -7251,26 +7678,31 @@ export default function PlanWorkspace() {
 
         {currentEmbankments.length > 0 && (
           <div style={{ fontSize: 12, color: '#334155', marginBottom: 5 }}>
-            🧱 <b>{currentEmbankments.length}</b> × Build / raise embankment
+            🧱 <b>{currentEmbankments.length}</b> × {(PREVENTION_TOOLS.find(function (t) { return t.key === 'embankment'; }) || {}).label || 'Raise Protective Bank'}
             {currentEmbankments.map(function (e, i) {
               return (
                 <div key={i} style={{ fontSize: 10, marginLeft: 20, marginTop: 4, padding: 6, background: '#f8fafc', borderRadius: 6 }}>
                   <div style={{ color: '#475569', fontWeight: 600 }}>
                     {e.lengthM}m long, {e.heightM}m high, {e.material}
                   </div>
-                  {e.difference ? (
-                    <div style={{ marginTop: 3 }}>
-                      <div style={{ color: '#059669', fontWeight: 700 }}>
-                        ✅ {e.difference.roads_saved} road{e.difference.roads_saved !== 1 ? 's' : ''} saved
+                  {e.difference ? (function () {
+                    var impact = deriveImpact(e.before, e.after);
+                    return (
+                      <div style={{ marginTop: 3 }}>
+                        <div style={{ color: impact.roadsSaved > 0 ? '#059669' : '#94a3b8', fontWeight: 700 }}>
+                          {impact.roadsSaved > 0
+                            ? '✅ ' + impact.roadsSaved + ' road' + (impact.roadsSaved !== 1 ? 's' : '') + ' saved'
+                            : 'No roads affected'}
+                        </div>
+                        <div style={{ color: '#64748b' }}>
+                          {impact.areaSavedM2 > 0 ? impact.areaSavedM2.toLocaleString() + ' m² protected' : 'No area change'}
+                        </div>
+                        <div style={{ color: '#94a3b8', fontSize: 9 }}>
+                          {e.before.flooded_percent}% → {e.after.flooded_percent}% flooded
+                        </div>
                       </div>
-                      <div style={{ color: '#64748b' }}>
-                        {e.difference.area_saved_m2 > 0 ? Math.round(e.difference.area_saved_m2) + ' m² protected' : 'No area change'}
-                      </div>
-                      <div style={{ color: '#94a3b8', fontSize: 9 }}>
-                        {e.before.flooded_percent}% → {e.after.flooded_percent}% flooded
-                      </div>
-                    </div>
-                  ) : (
+                    );
+                  })() : (
                     <div style={{ color: '#94a3b8' }}>Calculating impact...</div>
                   )}
                 </div>
@@ -7494,6 +7926,488 @@ export default function PlanWorkspace() {
           );
         })()}
       </div>
+
+      {preventionResult && !showBreakdown && (
+        <div
+          style={{
+            position: 'absolute',
+            top: 0, left: 0, right: 0, bottom: 0,
+            zIndex: 1001,
+            background: 'rgba(0,0,0,0.6)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+          }}
+          onClick={function () { setPreventionResult(null); setPreventionError(null); }}
+        >
+          <div
+            onClick={function (e) { e.stopPropagation(); }}
+            style={{
+              background: 'white',
+              borderRadius: 20,
+              padding: 24,
+              maxWidth: 780,
+              width: '90vw',
+              maxHeight: '85vh',
+              overflowY: 'auto',
+              fontFamily: 'system-ui, sans-serif',
+              boxShadow: '0 20px 60px rgba(0,0,0,0.4)',
+            }}
+          >
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+              <div style={{ fontSize: 18, fontWeight: 800, color: '#0f172a' }}>
+                🛡️ Prevention Impact Report
+              </div>
+              <button
+                onClick={function () { setPreventionResult(null); setPreventionError(null); }}
+                style={{ background: 'none', border: 'none', fontSize: 20, cursor: 'pointer', color: '#94a3b8' }}
+              >
+                ✕
+              </button>
+            </div>
+
+            <div style={{ display: 'flex', gap: 16, marginBottom: 16 }}>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: 13, fontWeight: 700, color: '#dc2626', marginBottom: 8 }}>Before (no prevention)</div>
+                <div ref={beforeMapContainer} style={{ width: '100%', height: 200, borderRadius: 10, border: '1px solid #fecaca', marginBottom: 8, overflow: 'hidden' }} />
+                <div style={{ fontSize: 11, color: '#334155' }}>
+                  <div style={{ marginBottom: 3 }}><b>{preventionResult.before.flooded_percent}%</b> area flooded</div>
+                  <div style={{ marginBottom: 3 }}><b>{preventionResult.before.roads_cut}</b> roads cut</div>
+                  <div style={{ marginBottom: 3 }}><b>{preventionResult.before.buildings_affected}</b> buildings affected</div>
+                  <div style={{ marginBottom: 3 }}><b>{preventionResult.before.avg_depth_m}m</b> avg depth</div>
+                  <div><b>{preventionResult.before.max_depth_m}m</b> max depth</div>
+                </div>
+              </div>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: 13, fontWeight: 700, color: '#059669', marginBottom: 8 }}>After (with prevention)</div>
+                <div ref={afterMapContainer} style={{ width: '100%', height: 200, borderRadius: 10, border: '1px solid #bbf7d0', marginBottom: 8, overflow: 'hidden' }} />
+                <div style={{ fontSize: 11, color: '#334155' }}>
+                  <div style={{ marginBottom: 3 }}><b>{preventionResult.after.flooded_percent}%</b> area flooded</div>
+                  <div style={{ marginBottom: 3 }}><b>{preventionResult.after.roads_cut}</b> roads cut</div>
+                  <div style={{ marginBottom: 3 }}><b>{preventionResult.after.buildings_affected}</b> buildings affected</div>
+                  <div style={{ marginBottom: 3 }}><b>{preventionResult.after.avg_depth_m}m</b> avg depth</div>
+                  <div><b>{preventionResult.after.max_depth_m}m</b> max depth</div>
+                </div>
+              </div>
+            </div>
+
+            {(function () {
+              var impact = deriveImpact(preventionResult.before, preventionResult.after);
+              var goodColor = '#059669';
+              var flatColor = '#94a3b8';
+              if (!impact.hasMeasurableEffect) {
+                return (
+                  <div style={{
+                    background: '#f8fafc',
+                    border: '1px solid #e2e8f0',
+                    borderRadius: 12,
+                    padding: 12,
+                    textAlign: 'center',
+                    fontSize: 12,
+                    color: '#64748b',
+                    marginBottom: 8,
+                  }}>
+                    No measurable improvement at this scale — the flood extent, roads and buildings are unchanged.
+                  </div>
+                );
+              }
+              return (
+                <div style={{
+                  background: '#f0fdf4',
+                  border: '1px solid #bbf7d0',
+                  borderRadius: 12,
+                  padding: 12,
+                  display: 'flex',
+                  gap: 20,
+                  justifyContent: 'center',
+                  fontSize: 12,
+                  marginBottom: 8,
+                }}>
+                  <div>
+                    <span style={{ color: impact.floodedPercentChange > 0 ? goodColor : flatColor, fontWeight: 800 }}>
+                      {impact.floodedPercentChange}%
+                    </span>
+                    <span style={{ color: '#64748b', marginLeft: 4 }}>less flood area</span>
+                  </div>
+                  <div>
+                    <span style={{ color: impact.areaSavedM2 > 0 ? goodColor : flatColor, fontWeight: 800 }}>
+                      {impact.areaSavedM2.toLocaleString()} m²
+                    </span>
+                    <span style={{ color: '#64748b', marginLeft: 4 }}>area saved</span>
+                  </div>
+                  <div>
+                    <span style={{ color: impact.roadsSaved > 0 ? goodColor : flatColor, fontWeight: 800 }}>
+                      {impact.roadsSaved}
+                    </span>
+                    <span style={{ color: '#64748b', marginLeft: 4 }}>roads saved</span>
+                  </div>
+                  <div>
+                    <span style={{ color: impact.buildingsSaved > 0 ? goodColor : flatColor, fontWeight: 800 }}>
+                      {impact.buildingsSaved}
+                    </span>
+                    <span style={{ color: '#64748b', marginLeft: 4 }}>buildings protected</span>
+                  </div>
+                </div>
+              );
+            })()}
+
+            <div style={{ fontSize: 9, color: '#64748b', marginBottom: 12, padding: '0 4px', display: 'flex', gap: 12, alignItems: 'center' }}>
+              <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                <span style={{ width: 9, height: 9, borderRadius: 2, background: '#2563eb', display: 'inline-block' }} /> still flooded
+              </span>
+              <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                <span style={{ width: 9, height: 9, borderRadius: 2, background: '#10b981', display: 'inline-block' }} /> protected by this plan
+              </span>
+            </div>
+
+            {(preventionResult.difference.water_level_saved_m > 0 || preventionResult.difference.volume_stored_m3 > 0) && (
+              <div style={{
+                background: '#eff6ff',
+                border: '1px solid #bfdbfe',
+                borderRadius: 12,
+                padding: '10px 14px',
+                fontSize: 11,
+                color: '#1e40af',
+                marginBottom: 14,
+                display: 'flex',
+                gap: 16,
+                alignItems: 'center',
+                flexWrap: 'wrap',
+              }}>
+                <span style={{ fontSize: 13 }}>💧</span>
+                <div>
+                  {preventionResult.difference.water_level_saved_m > 0 ? (
+                    <>
+                      <span style={{ fontWeight: 800 }}>Water level lowered by {preventionResult.difference.water_level_saved_m}m</span>
+                      <span style={{ color: '#3b82f6', marginLeft: 6 }}>—</span>
+                      <span style={{ marginLeft: 6 }}>
+                        <span style={{ fontWeight: 700 }}>{Number(preventionResult.difference.volume_stored_m3).toLocaleString()} m³</span> intercepted before it reaches the floodplain
+                      </span>
+                    </>
+                  ) : (
+                    <>
+                      <span style={{ fontWeight: 800 }}>{Number(preventionResult.difference.volume_stored_m3).toLocaleString()} m³ intercepted locally</span>
+                      <span style={{ color: '#3b82f6', marginLeft: 6 }}>—</span>
+                      <span style={{ marginLeft: 6 }}>
+                        a single measure can&apos;t lower this river&apos;s overall flood stage, but it protects the ground around it (see green area above)
+                      </span>
+                    </>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {preventionResult.capacity && preventionResult.capacity.applies_to_cause && (
+              <div style={{ fontSize: 10, color: '#64748b', marginBottom: 10, padding: '0 4px' }}>
+                Runoff coefficient: {preventionResult.capacity.runoff_coefficient_before || 0.6} → <b>{preventionResult.capacity.runoff_coefficient_after}</b>
+                {preventionResult.capacity.total_treated_length_m > 0 && (
+                  <span> ({Math.round(preventionResult.capacity.total_treated_length_m)}m of waterway treated)</span>
+                )}
+              </div>
+            )}
+
+            {preventionResult.terrain_meta && preventionResult.terrain_meta.pixels_raised > 0 && (
+              <div style={{ fontSize: 10, color: '#64748b', marginBottom: 10, padding: '0 4px' }}>
+                Terrain modified: {preventionResult.terrain_meta.pixels_raised} pixels raised, {preventionResult.terrain_meta.pixels_lowered} pixels lowered
+                {preventionResult.terrain_meta.subpixel_actions && preventionResult.terrain_meta.subpixel_actions.length > 0 && (
+                  <span> ({preventionResult.terrain_meta.subpixel_actions.length} sub-pixel actions scaled proportionally)</span>
+                )}
+              </div>
+            )}
+
+            <div style={{ display: 'flex', gap: 10 }}>
+              <button
+                onClick={runPreventionBreakdown}
+                disabled={breakdownLoading}
+                style={{
+                  flex: 1,
+                  padding: '10px',
+                  borderRadius: 10,
+                  border: 'none',
+                  background: '#0d9488',
+                  color: 'white',
+                  fontSize: 12,
+                  fontWeight: 700,
+                  cursor: 'pointer',
+                  opacity: breakdownLoading ? 0.7 : 1,
+                }}
+              >
+                {breakdownLoading ? 'Computing breakdown...' : 'See full impact report →'}
+              </button>
+              <button
+                onClick={function () { setPreventionResult(null); }}
+                style={{
+                  padding: '10px 16px',
+                  borderRadius: 10,
+                  border: '1px solid #e2e8f0',
+                  background: '#f8fafc',
+                  color: '#475569',
+                  fontSize: 12,
+                  fontWeight: 600,
+                  cursor: 'pointer',
+                }}
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showBreakdown && breakdownResult && (
+        <div
+          style={{
+            position: 'absolute',
+            top: 0, left: 0, right: 0, bottom: 0,
+            zIndex: 1002,
+            background: 'rgba(0,0,0,0.6)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+          }}
+          onClick={function () { setShowBreakdown(false); }}
+        >
+          <div
+            onClick={function (e) { e.stopPropagation(); }}
+            style={{
+              background: 'white',
+              borderRadius: 20,
+              padding: 24,
+              maxWidth: 760,
+              width: '92vw',
+              maxHeight: '88vh',
+              overflowY: 'auto',
+              fontFamily: 'system-ui, sans-serif',
+              boxShadow: '0 20px 60px rgba(0,0,0,0.4)',
+            }}
+          >
+            {/* Header */}
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 20 }}>
+              <div>
+                <div style={{ fontSize: 18, fontWeight: 800, color: '#0f172a' }}>Full Impact Report</div>
+                <div style={{ fontSize: 11, color: '#64748b', marginTop: 2 }}>Combined effect of all {(breakdownResult.per_action_breakdown || []).length} prevention actions</div>
+              </div>
+              <div style={{ display: 'flex', gap: 8 }}>
+                <button
+                  onClick={function () { setShowBreakdown(false); }}
+                  style={{ background: 'none', border: '1px solid #e2e8f0', borderRadius: 8, padding: '4px 12px', fontSize: 11, cursor: 'pointer', color: '#475569', fontWeight: 600 }}
+                >
+                  ← Summary
+                </button>
+                <button
+                  onClick={function () { setShowBreakdown(false); setPreventionResult(null); }}
+                  style={{ background: 'none', border: 'none', fontSize: 20, cursor: 'pointer', color: '#94a3b8' }}
+                >
+                  ✕
+                </button>
+              </div>
+            </div>
+
+            {/* Total effect banner — every number here is already clamped
+                server-side (max(0, before - after)), so 0 always means
+                "no measurable improvement", never a hidden negative. */}
+            {(function () {
+              var te = breakdownResult.total_effect || {};
+              var flat = { bg: 'linear-gradient(135deg, #f8fafc, #f1f5f9)', border: '#e2e8f0', text: '#94a3b8', label: '#64748b' };
+              var pctStyle = te.flooded_percent_change > 0 ? { bg: 'linear-gradient(135deg, #ecfdf5, #d1fae5)', border: '#a7f3d0', text: '#059669', label: '#065f46' } : flat;
+              var areaStyle = te.area_saved_m2 > 0 ? { bg: 'linear-gradient(135deg, #ecfdf5, #d1fae5)', border: '#a7f3d0', text: '#059669', label: '#065f46' } : flat;
+              var roadsStyle = te.roads_saved > 0 ? { bg: 'linear-gradient(135deg, #eff6ff, #dbeafe)', border: '#93c5fd', text: '#2563eb', label: '#1e3a8a' } : flat;
+              var bldgStyle = te.buildings_saved > 0 ? { bg: 'linear-gradient(135deg, #fdf4ff, #f3e8ff)', border: '#d8b4fe', text: '#7c3aed', label: '#4c1d95' } : flat;
+              var hasEffect = te.flooded_percent_change > 0 || te.area_saved_m2 > 0 || te.roads_saved > 0 || te.buildings_saved > 0;
+              return (
+                <>
+                  <div style={{ display: 'flex', gap: 12, marginBottom: hasEffect ? 16 : 8 }}>
+                    <div style={{ flex: 1, background: pctStyle.bg, borderRadius: 14, padding: '14px 16px', textAlign: 'center', border: '1px solid ' + pctStyle.border }}>
+                      <div style={{ fontSize: 28, fontWeight: 900, color: pctStyle.text, lineHeight: 1 }}>
+                        {te.flooded_percent_change || 0}%
+                      </div>
+                      <div style={{ fontSize: 10, color: pctStyle.label, fontWeight: 700, marginTop: 4 }}>Flood Area Reduction</div>
+                    </div>
+                    <div style={{ flex: 1, background: areaStyle.bg, borderRadius: 14, padding: '14px 16px', textAlign: 'center', border: '1px solid ' + areaStyle.border }}>
+                      <div style={{ fontSize: 22, fontWeight: 900, color: areaStyle.text, lineHeight: 1 }}>
+                        {Number(te.area_saved_m2 || 0).toLocaleString()}
+                      </div>
+                      <div style={{ fontSize: 10, color: areaStyle.label, fontWeight: 700, marginTop: 4 }}>m² Area Saved</div>
+                    </div>
+                    <div style={{ flex: 1, background: roadsStyle.bg, borderRadius: 14, padding: '14px 16px', textAlign: 'center', border: '1px solid ' + roadsStyle.border }}>
+                      <div style={{ fontSize: 28, fontWeight: 900, color: roadsStyle.text, lineHeight: 1 }}>
+                        {te.roads_saved || 0}
+                      </div>
+                      <div style={{ fontSize: 10, color: roadsStyle.label, fontWeight: 700, marginTop: 4 }}>Roads Protected</div>
+                    </div>
+                    <div style={{ flex: 1, background: bldgStyle.bg, borderRadius: 14, padding: '14px 16px', textAlign: 'center', border: '1px solid ' + bldgStyle.border }}>
+                      <div style={{ fontSize: 28, fontWeight: 900, color: bldgStyle.text, lineHeight: 1 }}>
+                        {te.buildings_saved || 0}
+                      </div>
+                      <div style={{ fontSize: 10, color: bldgStyle.label, fontWeight: 700, marginTop: 4 }}>Buildings Protected</div>
+                    </div>
+                  </div>
+                  {!hasEffect && (
+                    <div style={{ fontSize: 11, color: '#64748b', marginBottom: 16, padding: '0 4px' }}>
+                      No measurable improvement at this scale — the combined plan doesn&apos;t change flood extent, roads or buildings.
+                    </div>
+                  )}
+                </>
+              );
+            })()}
+
+            {/* Physics impact row */}
+            {breakdownResult.total_effect && (breakdownResult.total_effect.water_level_saved_m > 0 || breakdownResult.total_effect.volume_stored_m3 > 0) && (
+              <div style={{
+                background: 'linear-gradient(135deg, #eff6ff, #dbeafe)',
+                border: '1px solid #93c5fd',
+                borderRadius: 14,
+                padding: '12px 16px',
+                marginBottom: 16,
+                display: 'flex',
+                gap: 24,
+                alignItems: 'center',
+              }}>
+                <div style={{ textAlign: 'center', flex: 1 }}>
+                  <div style={{ fontSize: 22, fontWeight: 900, color: '#1d4ed8', lineHeight: 1 }}>
+                    {breakdownResult.total_effect.water_level_saved_m > 0
+                      ? breakdownResult.total_effect.water_level_saved_m + 'm'
+                      : Number(breakdownResult.total_effect.locally_protected_m3 || 0).toLocaleString()}
+                  </div>
+                  <div style={{ fontSize: 10, color: '#1e3a8a', fontWeight: 700, marginTop: 4 }}>
+                    {breakdownResult.total_effect.water_level_saved_m > 0 ? 'Water Level Lowered' : 'm³ Protecting Local Area'}
+                  </div>
+                </div>
+                <div style={{ width: 1, height: 36, background: '#bfdbfe' }} />
+                <div style={{ textAlign: 'center', flex: 1 }}>
+                  <div style={{ fontSize: 22, fontWeight: 900, color: '#1d4ed8', lineHeight: 1 }}>
+                    {Number(breakdownResult.total_effect.volume_stored_m3).toLocaleString()}
+                  </div>
+                  <div style={{ fontSize: 10, color: '#1e3a8a', fontWeight: 700, marginTop: 4 }}>m³ Volume Intercepted</div>
+                </div>
+              </div>
+            )}
+
+            {/* Interaction note */}
+            {breakdownResult.interaction_note && (
+              <div style={{ background: '#fffbeb', border: '1px solid #fcd34d', borderRadius: 10, padding: '8px 12px', fontSize: 10, color: '#92400e', marginBottom: 16 }}>
+                ℹ {breakdownResult.interaction_note}
+              </div>
+            )}
+
+            {/* Per-action section header */}
+            <div style={{ fontSize: 12, fontWeight: 700, color: '#0f172a', marginBottom: 6 }}>Individual Action Impact</div>
+            <div style={{ fontSize: 10, color: '#94a3b8', marginBottom: 12 }}>
+              Each row shows the marginal contribution of that action (leave-one-out method). Maps are zoomed to a fixed 500m radius around each action site.
+            </div>
+
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 11 }}>
+              <thead>
+                <tr style={{ borderBottom: '2px solid #e2e8f0', textAlign: 'left' }}>
+                  <th style={{ padding: '6px 4px', color: '#475569', fontWeight: 700 }}>Action</th>
+                  <th style={{ padding: '6px 4px', color: '#475569', fontWeight: 700 }}>Tier</th>
+                  <th style={{ padding: '6px 4px', color: '#475569', fontWeight: 700, textAlign: 'right' }}>Flood %</th>
+                  <th style={{ padding: '6px 4px', color: '#475569', fontWeight: 700, textAlign: 'right' }}>Roads</th>
+                  <th style={{ padding: '6px 4px', color: '#475569', fontWeight: 700, textAlign: 'right' }}>Buildings</th>
+                </tr>
+              </thead>
+              <tbody>
+                {breakdownResult.per_action_breakdown && breakdownResult.per_action_breakdown.map(function (row, i) {
+                  var typeLabel = row.type;
+                  var allTools = PREVENTION_TOOLS.concat(CUSTOM_ACTIONS);
+                  var toolDef = allTools.find(function (t) { return t.key === row.type; });
+                  if (toolDef) typeLabel = toolDef.emoji + ' ' + toolDef.label;
+                  var tierColor = row.honesty_tier === 'Simulated' ? '#059669' :
+                    row.honesty_tier.indexOf('simplified') >= 0 ? '#d97706' :
+                    row.honesty_tier.indexOf('Preparedness') >= 0 ? '#6366f1' : '#0d9488';
+                  return [
+                    <tr key={'map-' + i} style={{ borderBottom: 'none' }}>
+                      <td colSpan={5} style={{ padding: '8px 4px 0' }}>
+                        <div style={{ display: 'flex', gap: 8 }}>
+                          <div style={{ flex: 1 }}>
+                            <div style={{ fontSize: 9, color: '#64748b', marginBottom: 3, fontWeight: 600 }}>Before</div>
+                            <div
+                              ref={function (el) { breakdownMapContainers.current[i] = el; }}
+                              style={{ width: '100%', height: 120, borderRadius: 6, border: '1px solid #fecaca', overflow: 'hidden' }}
+                            />
+                          </div>
+                          <div style={{ flex: 1 }}>
+                            <div style={{ fontSize: 9, color: '#64748b', marginBottom: 3, fontWeight: 600 }}>After</div>
+                            <div
+                              ref={function (el) { breakdownAfterMapContainers.current[i] = el; }}
+                              style={{ width: '100%', height: 120, borderRadius: 6, border: '1px solid #bbf7d0', overflow: 'hidden' }}
+                            />
+                          </div>
+                        </div>
+                      </td>
+                    </tr>,
+                    <tr key={i} style={{ borderBottom: '1px solid #f1f5f9' }}>
+                      <td style={{ padding: '8px 4px' }}>
+                        <div style={{ fontWeight: 700, color: '#0f172a' }}>{typeLabel}</div>
+                        {row.note && (
+                          <div style={{ fontSize: 9, color: '#94a3b8', marginTop: 2 }}>{row.note}</div>
+                        )}
+                        {row.is_subpixel && (
+                          <div style={{ fontSize: 9, color: '#d97706', marginTop: 2 }}>Sub-pixel — effect scaled</div>
+                        )}
+                        {row.volume_stored_m3 > 0 && (
+                          <div style={{ fontSize: 9, color: '#2563eb', marginTop: 2 }}>
+                            💧 {Number(row.volume_stored_m3).toLocaleString()} m³ intercepted
+                            {row.water_level_saved_m > 0
+                              ? ' · ' + row.water_level_saved_m + 'm water level drop'
+                              : row.area_saved_m2 > 0
+                                ? ' · ' + Number(row.area_saved_m2).toLocaleString() + ' m² protected locally'
+                                : ' · protects its immediate surroundings, not the whole river stage'}
+                          </div>
+                        )}
+                      </td>
+                      <td style={{ padding: '8px 4px' }}>
+                        <span style={{
+                          display: 'inline-block',
+                          padding: '2px 6px',
+                          borderRadius: 6,
+                          background: tierColor + '15',
+                          color: tierColor,
+                          fontSize: 9,
+                          fontWeight: 700,
+                        }}>
+                          {row.honesty_tier}
+                        </span>
+                      </td>
+                      <td style={{ padding: '8px 4px', textAlign: 'right', fontWeight: 600, color: formatFloodPctDelta(row.delta_flooded_percent).color }}>
+                        {formatFloodPctDelta(row.delta_flooded_percent).text}
+                      </td>
+                      <td style={{ padding: '8px 4px', textAlign: 'right', fontWeight: 600, color: row.roads_saved > 0 ? '#059669' : '#94a3b8' }}>
+                        {row.roads_saved > 0 ? row.roads_saved : '—'}
+                      </td>
+                      <td style={{ padding: '8px 4px', textAlign: 'right', fontWeight: 600, color: row.buildings_saved > 0 ? '#059669' : '#94a3b8' }}>
+                        {row.buildings_saved > 0 ? row.buildings_saved : '—'}
+                      </td>
+                    </tr>,
+                  ];
+                })}
+              </tbody>
+              <tfoot>
+                <tr style={{ borderTop: '2px solid #e2e8f0', fontWeight: 800 }}>
+                  <td style={{ padding: '8px 4px', color: '#0f172a' }}>Combined Total</td>
+                  <td></td>
+                  <td style={{ padding: '8px 4px', textAlign: 'right', color: formatFloodPctDelta((breakdownResult.total_effect && breakdownResult.total_effect.flooded_percent_change) || 0).color }}>
+                    {formatFloodPctDelta((breakdownResult.total_effect && breakdownResult.total_effect.flooded_percent_change) || 0).text}
+                  </td>
+                  <td style={{ padding: '8px 4px', textAlign: 'right', color: (breakdownResult.total_effect && breakdownResult.total_effect.roads_saved) > 0 ? '#059669' : '#94a3b8' }}>
+                    {(breakdownResult.total_effect && breakdownResult.total_effect.roads_saved) || 0}
+                  </td>
+                  <td style={{ padding: '8px 4px', textAlign: 'right', color: (breakdownResult.total_effect && breakdownResult.total_effect.buildings_saved) > 0 ? '#059669' : '#94a3b8' }}>
+                    {(breakdownResult.total_effect && breakdownResult.total_effect.buildings_saved) || 0}
+                  </td>
+                </tr>
+              </tfoot>
+            </table>
+
+            {/* Overlap note */}
+            {breakdownResult.sum_of_marginals && Math.abs(breakdownResult.sum_of_marginals.flooded_percent_change - ((breakdownResult.total_effect && breakdownResult.total_effect.flooded_percent_change) || 0)) > 0.5 && (
+              <div style={{ fontSize: 10, color: '#94a3b8', marginTop: 10, padding: '6px 10px', background: '#f8fafc', borderRadius: 8 }}>
+                Sum of individual effects: {breakdownResult.sum_of_marginals.flooded_percent_change}% — actions overlap in coverage so combined total is less than the sum of parts. This is correct behaviour.
+              </div>
+            )}
+          </div>
+        </div>
+      )}
 
       <div ref={mapContainer} style={{ width: '100%', height: '100%' }} />
     </div>
