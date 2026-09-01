@@ -6,6 +6,7 @@ import * as maplibregl from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import * as turf from '@turf/turf';
 import { deriveImpact, formatFloodPctDelta } from '@/lib/impactFormat';
+import ResponseImpactModal from '@/components/ResponseImpactModal';
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8002';
 
@@ -3678,6 +3679,701 @@ function computeWarningCoverage(lat, lon, radiusM, geoData) {
   return coverage;
 }
 
+// =====================================================================
+// RESPONSE IMPACT REPORT (River Overflow) — risk-EXPOSURE coverage, not
+// flood extent. Response actions never change the flood itself, so
+// "before" and "after" both show the exact same flood/roads/buildings;
+// what differs is how much of that fixed risk is actually covered by
+// the plan's placed pins. Deliberately reuses the same primitives every
+// response-action validator above already reads — isPointInFloodExtent
+// for "is this building at risk", geoData.buildingPoints for the real
+// Buildings layer, geoData.floodedRoadsGeoJSON for the simulation's own
+// flooded-road list — no separate calculation path.
+// =====================================================================
+
+// Fixed service radii for the two point actions that have no user-set
+// coverage radius (boat launch, relief/medical post). These describe
+// REPORTING reach only — nothing above rejects a placement based on
+// them, so they don't belong in RESPONSE_RULES.
+const RESCUE_STAGING_REACH_M = 500;   // plausible boat/foot rescue radius from a launch point
+const RELIEF_MEDICAL_REACH_M = 800;   // roughly a 10-minute walk
+
+// Every building the live flood-depth grid currently marks as wet — the
+// same per-cell check resolveEvacuationZone/resolveWarningPoint/etc. use
+// to decide "is this point in the flood", just run over every mapped
+// building instead of one click.
+function riverOverflowAtRiskBuildings(scenario, geoData) {
+  const points = geoData.buildingPoints || [];
+  const out = [];
+  for (let i = 0; i < points.length; i++) {
+    const b = points[i];
+    if (!b) continue;
+    const here = isPointInFloodExtent(b[1], b[0], scenario, geoData);
+    if (here.ok && here.inFlood) out.push({ lon: b[0], lat: b[1] });
+  }
+  return out;
+}
+
+// True if `pt` falls within radiusM of ANY marker in `zoneMarkers`. When
+// radiusField is given, each marker's own placed radius (evacuation
+// zone / warning coverage) is used; otherwise every marker uses the
+// same fixed reach (boat launch / relief post).
+function coveredByAnyMarker(points, zoneMarkers, radiusField, fixedRadiusM) {
+  if (points.length === 0 || zoneMarkers.length === 0) return 0;
+  let n = 0;
+  for (let i = 0; i < points.length; i++) {
+    const pt = turf.point([points[i].lon, points[i].lat]);
+    const hit = zoneMarkers.some(function (z) {
+      const r = radiusField ? (Number(z.params && z.params[radiusField]) || fixedRadiusM) : fixedRadiusM;
+      return turf.distance(pt, turf.point([z.lon, z.lat]), { units: 'meters' }) <= r;
+    });
+    if (hit) n++;
+  }
+  return n;
+}
+
+// Full coverage snapshot for one set of placed markers/closures against
+// the current simulation. Called with empty arrays for "before" (no
+// plan placed) and the real plan for "after" — same function, same
+// geometry, only the marker list changes, so before/after can never
+// silently drift onto different data.
+//
+// Returns a scenario-agnostic shape (roads/evacuation/rescue/relief/
+// warning + roadFeatures/groups) so responseImpactStatRows,
+// responseImpactMapOverlay and responseImpactVerdict below can be
+// shared verbatim by every scenario's own compute*ResponseCoverage —
+// only the marker filtering and at-risk definition differ per scenario.
+function computeRiverOverflowResponseCoverage(scenario, geoData, markers, closedRoads) {
+  const atRisk = riverOverflowAtRiskBuildings(scenario, geoData);
+  const totalBuildings = atRisk.length;
+  const totalPeople = estimatePeople(totalBuildings);
+
+  const floodedRoadFeatures = (geoData.floodedRoadsGeoJSON && geoData.floodedRoadsGeoJSON.features) || [];
+  const closedIndex = {};
+  (closedRoads || []).forEach(function (r) {
+    if (r.roadIndex !== null && r.roadIndex !== undefined) closedIndex[r.roadIndex] = true;
+  });
+  const roadFeatures = floodedRoadFeatures.map(function (f) {
+    return Object.assign({}, f, {
+      properties: Object.assign({}, f.properties, { closed: !!closedIndex[f.properties.roadIndex] }),
+    });
+  });
+  const roadsClosed = roadFeatures.filter(function (f) { return f.properties.closed; }).length;
+  const roadsOpen = roadFeatures.length - roadsClosed;
+
+  const evacZones = (markers || []).filter(function (m) { return m.type === 'evacuationZone'; });
+  const boatLaunches = (markers || []).filter(function (m) { return m.type === 'boatLaunch'; });
+  const reliefPosts = (markers || []).filter(function (m) { return m.type === 'reliefMedicalPost'; });
+  const warningPoints = (markers || []).filter(function (m) { return m.type === 'warningPoint'; });
+
+  const evacCovered = coveredByAnyMarker(atRisk, evacZones, 'radiusM', 300);
+  const rescueCovered = coveredByAnyMarker(atRisk, boatLaunches, null, RESCUE_STAGING_REACH_M);
+  const reliefCovered = coveredByAnyMarker(atRisk, reliefPosts, null, RELIEF_MEDICAL_REACH_M);
+  const warningCovered = coveredByAnyMarker(atRisk, warningPoints, 'coverageRadiusM', 400);
+
+  function pct(n) { return totalBuildings > 0 ? Math.round((n / totalBuildings) * 100) : 0; }
+
+  return {
+    atRisk: atRisk,
+    totalBuildings: totalBuildings,
+    totalPeople: totalPeople,
+    roads: { total: roadFeatures.length, open: roadsOpen, closed: roadsClosed },
+    roadFeatures: roadFeatures,
+    evacuation: { covered: evacCovered, percent: pct(evacCovered) },
+    rescue: { covered: rescueCovered, percent: pct(rescueCovered) },
+    relief: { covered: reliefCovered, percent: pct(reliefCovered) },
+    warning: { covered: warningCovered, percent: pct(warningCovered), people: estimatePeople(warningCovered) },
+    groups: [
+      { markers: evacZones, radiusField: 'radiusM', fixedRadiusM: 300, color: '#7c3aed' },
+      { markers: warningPoints, radiusField: 'coverageRadiusM', fixedRadiusM: 400, color: '#f59e0b' },
+      { markers: boatLaunches, radiusField: null, fixedRadiusM: RESCUE_STAGING_REACH_M, color: '#0ea5e9' },
+      { markers: reliefPosts, radiusField: null, fixedRadiusM: RELIEF_MEDICAL_REACH_M, color: '#16a34a' },
+    ],
+  };
+}
+
+// Plain stat rows, in the exact order the Response Impact Report asks
+// for. Kept as { value, suffix } — bold value + plain description —
+// matching how the Prevention Impact Report renders its own rows.
+// roadsSuffix lets each scenario name its own "flagged risk segment"
+// concept (flooded roads vs. flagged low-point/underpass segments)
+// while every other row stays identically worded across scenarios.
+function responseImpactStatRows(cov, roadsSuffix) {
+  return [
+    { value: cov.evacuation.percent + '%', suffix: 'of at-risk buildings covered by an evacuation zone' },
+    { value: cov.roads.open + ' open, ' + cov.roads.closed + ' closed', suffix: roadsSuffix || 'flooded roads' },
+    { value: cov.rescue.percent + '%', suffix: 'of at-risk buildings within rescue-staging reach' },
+    { value: cov.relief.percent + '%', suffix: 'of at-risk buildings within relief camp / medical reach' },
+    { value: cov.warning.percent + '%', suffix: 'of at-risk population within warning range' },
+  ];
+}
+
+// GeoJSON for the two mini-maps: at-risk road segments (colored by
+// closed/open — rendered as both a line AND a circle layer so this
+// works whether the scenario's segments are LineStrings, like river
+// overflow's flooded roads, or Points, like rainfall's low-point/
+// underpass markers; MapLibre silently skips features that don't match
+// a layer's geometry type) plus a circle polygon and a point per placed
+// coverage marker, grouped by cov.groups so this function never needs
+// to know a scenario's specific pin type names.
+function responseImpactMapOverlay(cov) {
+  function circleFeature(m, radiusM, color) {
+    const c = turf.circle([m.lon, m.lat], radiusM / 1000, { units: 'kilometers', steps: 48 });
+    c.properties = { color: color };
+    return c;
+  }
+
+  let circles = [];
+  let points = [];
+  (cov.groups || []).forEach(function (group) {
+    circles = circles.concat(group.markers.map(function (m) {
+      const r = group.radiusField ? (Number(m.params && m.params[group.radiusField]) || group.fixedRadiusM) : group.fixedRadiusM;
+      return circleFeature(m, r, group.color);
+    }));
+    points = points.concat(group.markers.map(function (m) {
+      return { type: 'Feature', properties: { color: group.color }, geometry: { type: 'Point', coordinates: [m.lon, m.lat] } };
+    }));
+  });
+
+  return {
+    roads: { type: 'FeatureCollection', features: cov.roadFeatures },
+    circles: { type: 'FeatureCollection', features: circles },
+    points: { type: 'FeatureCollection', features: points },
+  };
+}
+
+// Plain-language verdict: names whichever coverage category is worst,
+// with the real gap percentage — never a static "no improvement" line.
+function responseImpactVerdict(after) {
+  if (after.totalBuildings === 0) {
+    return { text: 'No buildings currently sit inside a mapped risk area.', tone: 'neutral' };
+  }
+  const gaps = [
+    { pct: 100 - after.warning.percent, text: 'still unwarned' },
+    { pct: 100 - after.evacuation.percent, text: 'outside any evacuation zone' },
+    { pct: 100 - after.rescue.percent, text: 'outside rescue-staging reach' },
+    { pct: 100 - after.relief.percent, text: 'outside relief camp / medical reach' },
+  ];
+  gaps.sort(function (a, b) { return b.pct - a.pct; });
+  const worst = gaps[0];
+  if (worst.pct <= 0) {
+    return { text: 'Every at-risk building is covered by this plan across all four categories.', tone: 'good' };
+  }
+  return {
+    text: worst.pct + '% of at-risk buildings are ' + worst.text + '.',
+    tone: worst.pct >= 50 ? 'bad' : 'warn',
+  };
+}
+
+// Shared header sentence for the building/population-based scenarios
+// (river overflow, rainfall) — the drainage-failure report below builds
+// its own, since its unit is area/points, not buildings.
+function atRiskSummaryLine(after, riskAreaLabel) {
+  return '📍 ' + after.totalBuildings + ' building' + (after.totalBuildings === 1 ? '' : 's') +
+    ' (≈' + after.totalPeople.toLocaleString() + ' people) currently inside ' + riskAreaLabel +
+    ' — both panels below measure coverage against this same set.';
+}
+
+// Assembles everything ResponseImpactModal needs to render, for one
+// scenario + one marker/closure set. This is the single entry point —
+// buildResponseImpactReport() in the component calls it twice (once
+// with empty markers/closedRoads for "before", once with the real plan
+// for "after") so both panels are guaranteed to read the same live data.
+function buildRiverOverflowResponseImpact(scenario, geoData, markers, closedRoads) {
+  const before = computeRiverOverflowResponseCoverage(scenario, geoData, [], []);
+  const after = computeRiverOverflowResponseCoverage(scenario, geoData, markers, closedRoads);
+  return {
+    summaryLine: atRiskSummaryLine(after, 'the flood extent'),
+    before: { statRows: responseImpactStatRows(before), mapOverlay: responseImpactMapOverlay(before) },
+    after: { statRows: responseImpactStatRows(after), mapOverlay: responseImpactMapOverlay(after) },
+    verdict: responseImpactVerdict(after),
+  };
+}
+
+// =====================================================================
+// RESPONSE IMPACT REPORT (Rainfall) — same risk-EXPOSURE idea as the
+// River Overflow report above, reusing responseImpactStatRows /
+// responseImpactMapOverlay / responseImpactVerdict unchanged. Rainfall
+// has no flood polygon or depth grid: risk lives in the terrain-derived
+// drainage-risk zones (geoData.drainageRiskGeoJSON) and the mapped
+// low-point/underpass road layer (geoData.roadLowPointsGeoJSON) — the
+// exact same layers isPointInsideAnyRiskZone/nearestLowPoint already
+// read for every rainfall action resolver above.
+// =====================================================================
+
+// Every building whose centroid falls inside ANY mapped drainage-risk
+// zone — the rainfall equivalent of "inside the flood extent".
+function rainfallAtRiskBuildings(geoData) {
+  const points = geoData.buildingPoints || [];
+  const out = [];
+  for (let i = 0; i < points.length; i++) {
+    const b = points[i];
+    if (!b) continue;
+    if (isPointInsideAnyRiskZone(b[1], b[0], geoData)) out.push({ lon: b[0], lat: b[1] });
+  }
+  return out;
+}
+
+function computeRainfallResponseCoverage(geoData, markers, closedRoads) {
+  const atRisk = rainfallAtRiskBuildings(geoData);
+  const totalBuildings = atRisk.length;
+  const totalPeople = estimatePeople(totalBuildings);
+
+  // Rainfall closures are identified by road graph node ids (u/v), not
+  // by an index into a simulation-specific flooded-road list — see
+  // resolveRainRoadClosure / submitResponseAction's rainRoadClosure
+  // branch, which records roadU/roadV but no floodedRoadIndex.
+  const lowPointFeatures = (geoData.roadLowPointsGeoJSON && geoData.roadLowPointsGeoJSON.features) || [];
+  const closedUV = {};
+  (closedRoads || []).forEach(function (r) {
+    if (r.roadU !== undefined && r.roadU !== null && r.roadV !== undefined && r.roadV !== null) {
+      closedUV[r.roadU + '|' + r.roadV] = true;
+    }
+  });
+  const roadFeatures = lowPointFeatures.map(function (f) {
+    const key = f.properties.u + '|' + f.properties.v;
+    return Object.assign({}, f, { properties: Object.assign({}, f.properties, { closed: !!closedUV[key] }) });
+  });
+  const roadsClosed = roadFeatures.filter(function (f) { return f.properties.closed; }).length;
+  const roadsOpen = roadFeatures.length - roadsClosed;
+
+  const evacZones = (markers || []).filter(function (m) { return m.type === 'rainEvacZone'; });
+  const rescuePoints = (markers || []).filter(function (m) { return m.type === 'rainWaterRescue'; });
+  const medicalPosts = (markers || []).filter(function (m) { return m.type === 'rainMedicalPost'; });
+  const reliefCamps = (markers || []).filter(function (m) { return m.type === 'rainReliefCamp'; });
+  const warningPoints = (markers || []).filter(function (m) { return m.type === 'rainWarning'; });
+
+  const evacCovered = coveredByAnyMarker(atRisk, evacZones, 'radiusM', 300);
+  const rescueCovered = coveredByAnyMarker(atRisk, rescuePoints, null, RESCUE_STAGING_REACH_M);
+  // Medical/shelter reach is a union: a building only needs to be near
+  // EITHER a medical post OR a relief camp to count as covered — the two
+  // pins stayed separate here (unlike river overflow's merged pin), but
+  // report as the one "medical/shelter reach" category Phase 1 uses.
+  const reliefCovered = coveredByAnyMarker(atRisk, medicalPosts.concat(reliefCamps), null, RELIEF_MEDICAL_REACH_M);
+  const warningCovered = coveredByAnyMarker(atRisk, warningPoints, 'coverageRadiusM', 400);
+
+  function pct(n) { return totalBuildings > 0 ? Math.round((n / totalBuildings) * 100) : 0; }
+
+  return {
+    atRisk: atRisk,
+    totalBuildings: totalBuildings,
+    totalPeople: totalPeople,
+    roads: { total: roadFeatures.length, open: roadsOpen, closed: roadsClosed },
+    roadFeatures: roadFeatures,
+    evacuation: { covered: evacCovered, percent: pct(evacCovered) },
+    rescue: { covered: rescueCovered, percent: pct(rescueCovered) },
+    relief: { covered: reliefCovered, percent: pct(reliefCovered) },
+    warning: { covered: warningCovered, percent: pct(warningCovered), people: estimatePeople(warningCovered) },
+    groups: [
+      { markers: evacZones, radiusField: 'radiusM', fixedRadiusM: 300, color: '#7c3aed' },
+      { markers: warningPoints, radiusField: 'coverageRadiusM', fixedRadiusM: 400, color: '#f59e0b' },
+      { markers: rescuePoints, radiusField: null, fixedRadiusM: RESCUE_STAGING_REACH_M, color: '#0ea5e9' },
+      { markers: medicalPosts, radiusField: null, fixedRadiusM: RELIEF_MEDICAL_REACH_M, color: '#e11d48' },
+      { markers: reliefCamps, radiusField: null, fixedRadiusM: RELIEF_MEDICAL_REACH_M, color: '#16a34a' },
+    ],
+  };
+}
+
+function buildRainfallResponseImpact(geoData, markers, closedRoads) {
+  const before = computeRainfallResponseCoverage(geoData, [], []);
+  const after = computeRainfallResponseCoverage(geoData, markers, closedRoads);
+  const roadsSuffix = 'flagged low-point/underpass road segments';
+  return {
+    summaryLine: atRiskSummaryLine(after, 'a mapped drainage-risk zone'),
+    before: { statRows: responseImpactStatRows(before, roadsSuffix), mapOverlay: responseImpactMapOverlay(before) },
+    after: { statRows: responseImpactStatRows(after, roadsSuffix), mapOverlay: responseImpactMapOverlay(after) },
+    verdict: responseImpactVerdict(after),
+  };
+}
+
+// =====================================================================
+// RESPONSE IMPACT REPORT (Drainage Failure) — this scenario's actions
+// are INFRASTRUCTURE FIXES (clear a culvert, deploy a pump, route a
+// bypass, flag a contaminated overflow point), not evacuation, so the
+// metrics change in kind from the two reports above: coverage is
+// measured as % of drainage-risk AREA addressed and a count of flagged
+// overflow POINTS warned, not a building/population percentage. Still
+// reuses responseImpactMapOverlay/ResponseImpactModal unchanged, and
+// reads the exact same drainageRiskGeoJSON / roadJunctions / live
+// flood-depth-grid data every resolveDrainXxx validator above already
+// reads — no separate calculation path.
+// =====================================================================
+
+// A blockage-clearance crew, a pump, or a bypass path each fix ONE
+// localized point of failure, not a neighbourhood-scale service area —
+// a much tighter reach than the evacuation-oriented radii used above.
+// Also used as the "does the vector-control point reach this zone"
+// radius, since both questions are "is an intervention close enough to
+// this zone to plausibly be treating it".
+const DRAIN_INTERVENTION_REACH_M = 150;
+
+// The drainage-risk layer carries no time-series/duration field per
+// zone, so "persisted longest" uses this codebase's own severity
+// ranking (RISK_CLASS_ORDER) — the same proxy resolveRainWaterRescue
+// already uses to rank zones — as the closest available signal: deeper,
+// more severe pooling drains slower and is the best stand-in for
+// "stays standing longest" without inventing data that doesn't exist.
+function longestPersistingZones(geoData) {
+  const fc = geoData && geoData.drainageRiskGeoJSON;
+  if (!fc || !fc.features || fc.features.length === 0) return [];
+  let maxClass = null;
+  fc.features.forEach(function (f) {
+    const cls = f.properties && f.properties.risk_class;
+    if (cls && (!maxClass || RISK_CLASS_ORDER[cls] > RISK_CLASS_ORDER[maxClass])) maxClass = cls;
+  });
+  if (!maxClass) return [];
+  return fc.features.filter(function (f) { return f.properties && f.properties.risk_class === maxClass; });
+}
+
+function computeDrainageFailureResponseCoverage(scenario, geoData, markers) {
+  const rules = getResponseRules(scenario);
+  const zones = (geoData.drainageRiskGeoJSON && geoData.drainageRiskGeoJSON.features) || [];
+
+  const clearance = (markers || []).filter(function (m) { return m.type === 'drainBlockageClearance'; });
+  const pumps = (markers || []).filter(function (m) { return m.type === 'drainPumpDeployment'; });
+  const bypasses = (markers || []).filter(function (m) { return m.type === 'drainBypass'; });
+  const overflowMarkers = (markers || []).filter(function (m) { return m.type === 'drainSewerOverflow'; });
+  const vectorPoints = (markers || []).filter(function (m) { return m.type === 'drainVectorControl'; });
+  const interventions = clearance.concat(pumps, bypasses);
+
+  // Each zone polygon becomes "addressed" if ANY clearance/pump/bypass
+  // marker sits within reach of it — the `closed` flag doubles as the
+  // fill/line/point "handled" flag responseImpactMapOverlay already
+  // knows how to draw.
+  let totalAreaM2 = 0;
+  let addressedAreaM2 = 0;
+  const zoneFeatures = zones.map(function (z) {
+    const areaM2 = Number(z.properties && z.properties.area_m2) || 0;
+    totalAreaM2 += areaM2;
+    const addressed = interventions.some(function (m) {
+      return distanceToFeatureM(turf.point([m.lon, m.lat]), z) <= DRAIN_INTERVENTION_REACH_M;
+    });
+    if (addressed) addressedAreaM2 += areaM2;
+    return Object.assign({}, z, { properties: Object.assign({}, z.properties, { closed: addressed }) });
+  });
+  const areaAddressedPct = totalAreaM2 > 0 ? Math.round((addressedAreaM2 / totalAreaM2) * 100) : 0;
+
+  // "Flagged" overflow points are real road junctions the live flood
+  // grid currently shows wet — the same precondition
+  // resolveDrainSewerOverflow itself enforces before a marker can be
+  // placed there, so this walks the identical junction set instead of a
+  // separately-invented list.
+  const junctions = roadJunctions(geoData).filter(function (j) { return j.degree >= rules.JUNCTION_MIN_DEGREE; });
+  const flaggedOverflowPoints = junctions.filter(function (j) {
+    const flood = isPointInFloodExtent(j.lat, j.lon, scenario, geoData);
+    return flood.ok && flood.inFlood;
+  });
+  const overflowPointFeatures = flaggedOverflowPoints.map(function (j) {
+    const warned = overflowMarkers.some(function (m) {
+      return turf.distance(turf.point([m.lon, m.lat]), turf.point([j.lon, j.lat]), { units: 'meters' }) <= rules.JUNCTION_SNAP_MAX_M;
+    });
+    return { type: 'Feature', properties: { closed: warned }, geometry: { type: 'Point', coordinates: [j.lon, j.lat] } };
+  });
+  const overflowWarned = overflowPointFeatures.filter(function (f) { return f.properties.closed; }).length;
+  const overflowUnwarned = overflowPointFeatures.length - overflowWarned;
+  const overflowWarnedPct = overflowPointFeatures.length > 0 ? Math.round((overflowWarned / overflowPointFeatures.length) * 100) : 0;
+
+  // null = no vector-control point placed yet (before, or an after with
+  // none); boolean once at least one exists.
+  const worstZones = longestPersistingZones(geoData);
+  let vectorCoversWorst = null;
+  if (vectorPoints.length > 0 && worstZones.length > 0) {
+    vectorCoversWorst = worstZones.some(function (z) {
+      return vectorPoints.some(function (m) {
+        return distanceToFeatureM(turf.point([m.lon, m.lat]), z) <= DRAIN_INTERVENTION_REACH_M;
+      });
+    });
+  }
+
+  return {
+    totalAreaM2: totalAreaM2,
+    areaAddressedM2: addressedAreaM2,
+    areaAddressedPct: areaAddressedPct,
+    overflow: { total: overflowPointFeatures.length, warned: overflowWarned, unwarned: overflowUnwarned, percent: overflowWarnedPct },
+    vectorPointCount: vectorPoints.length,
+    worstZoneCount: worstZones.length,
+    vectorCoversWorst: vectorCoversWorst,
+    roadFeatures: zoneFeatures.concat(overflowPointFeatures),
+    groups: [
+      { markers: interventions, radiusField: null, fixedRadiusM: DRAIN_INTERVENTION_REACH_M, color: '#0ea5e9' },
+      { markers: vectorPoints, radiusField: null, fixedRadiusM: DRAIN_INTERVENTION_REACH_M, color: '#4d7c0f' },
+      { markers: overflowMarkers, radiusField: null, fixedRadiusM: rules.JUNCTION_SNAP_MAX_M, color: '#7c2d12' },
+    ],
+  };
+}
+
+function drainageFailureImpactStatRows(cov) {
+  const rows = [
+    {
+      value: cov.areaAddressedPct + '% addressed, ' + (100 - cov.areaAddressedPct) + '% untreated',
+      suffix: 'of the mapped drainage-risk area',
+    },
+    {
+      value: cov.overflow.warned + ' warned, ' + cov.overflow.unwarned + ' unwarned',
+      suffix: 'flagged sewer/manhole overflow points',
+    },
+  ];
+  if (cov.vectorPointCount === 0) {
+    rows.push({ value: 'not placed', suffix: 'standing-water / vector-control point' });
+  } else if (cov.worstZoneCount === 0) {
+    rows.push({ value: 'n/a', suffix: 'no drainage-risk zones mapped to rank by persistence' });
+  } else {
+    rows.push({
+      value: cov.vectorCoversWorst ? '✅ yes' : '❌ no',
+      suffix: 'the vector-control point covers the ' + cov.worstZoneCount +
+        ' zone' + (cov.worstZoneCount > 1 ? 's' : '') + ' that have persisted longest',
+    });
+  }
+  return rows;
+}
+
+function drainageFailureImpactVerdict(after) {
+  const gaps = [];
+  if (after.totalAreaM2 > 0) gaps.push({ pct: 100 - after.areaAddressedPct, text: 'of the mapped drainage-risk area is still untreated' });
+  if (after.overflow.total > 0) gaps.push({ pct: 100 - after.overflow.percent, text: 'of flagged overflow points are still unwarned' });
+
+  if (gaps.length === 0) {
+    return { text: 'No drainage-risk zones or flagged overflow points are mapped for this simulation.', tone: 'neutral' };
+  }
+  gaps.sort(function (a, b) { return b.pct - a.pct; });
+  const worst = gaps[0];
+  if (worst.pct <= 0) {
+    return { text: 'Every drainage-risk zone is addressed and every flagged overflow point is warned.', tone: 'good' };
+  }
+  return { text: worst.pct + '% ' + worst.text + '.', tone: worst.pct >= 50 ? 'bad' : 'warn' };
+}
+
+function drainageFailureSummaryLine(after) {
+  const areaText = after.totalAreaM2 >= 10000
+    ? (after.totalAreaM2 / 1e6).toFixed(2) + ' km²'
+    : Math.round(after.totalAreaM2).toLocaleString() + ' m²';
+  return '📍 ' + areaText + ' of mapped drainage-risk area, ' + after.overflow.total +
+    ' flagged sewer/manhole overflow point' + (after.overflow.total === 1 ? '' : 's') +
+    ' — both panels below measure how much of that is actually treated.';
+}
+
+function buildDrainageFailureResponseImpact(scenario, geoData, markers) {
+  const before = computeDrainageFailureResponseCoverage(scenario, geoData, []);
+  const after = computeDrainageFailureResponseCoverage(scenario, geoData, markers);
+  return {
+    summaryLine: drainageFailureSummaryLine(after),
+    before: { statRows: drainageFailureImpactStatRows(before), mapOverlay: responseImpactMapOverlay(before) },
+    after: { statRows: drainageFailureImpactStatRows(after), mapOverlay: responseImpactMapOverlay(after) },
+    verdict: drainageFailureImpactVerdict(after),
+  };
+}
+
+// =====================================================================
+// RESPONSE IMPACT REPORT (Dam Release) — reuses ResponseImpactModal a
+// fourth time. Unlike the previous three, this scenario has no flood
+// grid or risk-zone polygon defining "at risk": the hazard is a wave
+// travelling down Korang Nullah, so every point's risk is a computed
+// ARRIVAL TIME from the dam (damArrival — the same function every
+// resolveDamXxx validator above already calls). "At risk" is therefore
+// every building inside the modeled area at all (isWithinModeledArea —
+// the wave eventually reaches everywhere the terrain data covers, just
+// at different times), and coverage for the rally-point stat is judged
+// against each building's OWN arrival time, not a fixed radius.
+// =====================================================================
+
+function damAtRiskBuildings(geoData) {
+  const points = geoData.buildingPoints || [];
+  const out = [];
+  for (let i = 0; i < points.length; i++) {
+    const b = points[i];
+    if (!b) continue;
+    if (isWithinModeledArea(b[1], b[0], geoData)) out.push({ lon: b[0], lat: b[1] });
+  }
+  return out;
+}
+
+// A building is "covered" by a rally point only if it could actually
+// walk there before the wave arrives — the exact reachability test
+// resolveDamRallyPoint itself runs (walkMinutes <= arrival * reaction
+// fraction), just measured from each at-risk building instead of from
+// the waterway.
+function coveredByReachableRallyPoint(atRisk, rallyPoints, discharge, rules) {
+  if (atRisk.length === 0 || rallyPoints.length === 0) return 0;
+  let n = 0;
+  atRisk.forEach(function (b) {
+    const arrival = damArrival(b.lat, b.lon, discharge, rules);
+    const windowMin = arrival.minutes * rules.RALLY_REACTION_FRACTION;
+    const reachable = rallyPoints.some(function (r) {
+      const distKm = turf.distance(turf.point([b.lon, b.lat]), turf.point([r.lon, r.lat]), { units: 'kilometers' });
+      const walkMinutes = (distKm / rules.WALK_SPEED_KMH) * 60;
+      return walkMinutes <= windowMin;
+    });
+    if (reachable) n++;
+  });
+  return n;
+}
+
+// Real bridges/crossings have no enumerated list in this data (unlike
+// river overflow's flooded-road list or rainfall's low-point layer) —
+// resolveDamCrossingClosure itself just snaps any click to the nearest
+// waterway point within CROSSING_SNAP_MAX_M. This walks one sample
+// point per digitised waterway piece (215 of them, not every vertex —
+// see the perf note below) and keeps the ones that actually run near a
+// real road, then merges candidates sitting close together so one
+// physical bridge digitised as several short waterway pieces isn't
+// double-counted.
+//
+// nearestRoad() itself is NOT used here: it does one full scan of the
+// entire ~11,500-feature road collection per call, which measured at
+// ~19s for 215 calls — fine for the single click it's built for, much
+// too slow run in bulk. nearestRoadBulk() below reuses the same
+// distance/threshold logic but pre-filters to a tight bbox around each
+// query point first (cached per-feature bboxes), which is what actually
+// makes 215 calls fast.
+let _roadBboxCache = null;
+let _roadBboxCacheSource = null;
+function roadBboxIndex(geoData) {
+  const roads = geoData && geoData.roadsGeoJSON;
+  if (!roads || !roads.features) return null;
+  if (_roadBboxCacheSource === roads) return _roadBboxCache;
+  _roadBboxCache = { roads: roads, boxes: roads.features.map(function (f) { return turf.bbox(f); }) };
+  _roadBboxCacheSource = roads;
+  return _roadBboxCache;
+}
+function nearestRoadBulk(lat, lon, maxDistanceM, geoData) {
+  const idx = roadBboxIndex(geoData);
+  if (!idx) return { found: false, dataMissing: true };
+  // 111,320 m/degree latitude, with generous 1.5x headroom to cover
+  // longitude's smaller metres-per-degree at this latitude — this is
+  // only a prefilter margin, so over-including candidates is harmless.
+  const padDeg = (maxDistanceM / 111320) * 1.5;
+  const w = lon - padDeg, e = lon + padDeg, s = lat - padDeg, n = lat + padDeg;
+  const candidates = [];
+  for (let i = 0; i < idx.roads.features.length; i++) {
+    const b = idx.boxes[i];
+    if (b[0] <= e && b[2] >= w && b[1] <= n && b[3] >= s) candidates.push(idx.roads.features[i]);
+  }
+  if (candidates.length === 0) return { found: false, dataMissing: false, distanceM: null };
+  const snapped = turf.nearestPointOnLine({ type: 'FeatureCollection', features: candidates }, turf.point([lon, lat]), { units: 'meters' });
+  return { found: snapped.properties.dist <= maxDistanceM, dataMissing: false, distanceM: snapped.properties.dist };
+}
+
+function damCrossingCandidates(geoData, rules) {
+  const waterways = geoData.waterwaysGeoJSON;
+  if (!waterways || !waterways.features) return [];
+
+  const raw = [];
+  waterways.features.forEach(function (wf) {
+    if (!wf.geometry || wf.geometry.type !== 'LineString' || wf.geometry.coordinates.length === 0) return;
+    const coords = wf.geometry.coordinates;
+    const mid = coords[Math.floor(coords.length / 2)];
+    const road = nearestRoadBulk(mid[1], mid[0], rules.CROSSING_SNAP_MAX_M, geoData);
+    if (road.found) raw.push({ lat: mid[1], lon: mid[0] });
+  });
+
+  // Greedy merge: a candidate within reach of an already-kept cluster is
+  // treated as the same physical bridge, not a second one. A wider
+  // radius than SAME_TYPE_OVERLAP_M on purpose — that constant is sized
+  // for telling two DIFFERENT placed actions apart, not for collapsing
+  // several digitised pieces of the same crossing.
+  const CLUSTER_RADIUS_M = rules.SAME_TYPE_OVERLAP_M * 3;
+  const clusters = [];
+  raw.forEach(function (c) {
+    const already = clusters.some(function (cl) {
+      return turf.distance(turf.point([c.lon, c.lat]), turf.point([cl.lon, cl.lat]), { units: 'meters' }) <= CLUSTER_RADIUS_M;
+    });
+    if (!already) clusters.push(c);
+  });
+  return clusters;
+}
+
+function computeDamReleaseResponseCoverage(scenario, geoData, markers, crossingCandidates) {
+  const rules = getResponseRules(scenario);
+  const discharge = currentDischargeCusecs(geoData, rules);
+
+  const atRisk = damAtRiskBuildings(geoData);
+  const totalBuildings = atRisk.length;
+  const totalPeople = estimatePeople(totalBuildings);
+
+  const evacZones = (markers || []).filter(function (m) { return m.type === 'damEvacZone'; });
+  const rallyPoints = (markers || []).filter(function (m) { return m.type === 'damRallyPoint'; });
+  const crossingClosures = (markers || []).filter(function (m) { return m.type === 'damCrossingClosure'; });
+
+  function pct(n) { return totalBuildings > 0 ? Math.round((n / totalBuildings) * 100) : 0; }
+
+  const evacCovered = coveredByAnyMarker(atRisk, evacZones, 'radiusM', 300);
+  const rallyCovered = coveredByReachableRallyPoint(atRisk, rallyPoints, discharge, rules);
+
+  const crossingFeatures = (crossingCandidates || []).map(function (c) {
+    const closed = crossingClosures.some(function (m) {
+      return turf.distance(turf.point([m.lon, m.lat]), turf.point([c.lon, c.lat]), { units: 'meters' }) <= rules.SAME_TYPE_OVERLAP_M * 3;
+    });
+    return { type: 'Feature', properties: { closed: closed }, geometry: { type: 'Point', coordinates: [c.lon, c.lat] } };
+  });
+  const crossingsClosed = crossingFeatures.filter(function (f) { return f.properties.closed; }).length;
+  const crossingsOpen = crossingFeatures.length - crossingsClosed;
+
+  // Rally points get a per-marker CATCHMENT radius (how far someone can
+  // walk from it in the reaction-fraction of ITS OWN wave-arrival time)
+  // instead of one fixed radius — stashed onto a synthetic params field
+  // so responseImpactMapOverlay's existing radiusField lookup can draw
+  // it without needing to know dam release's time-based math at all.
+  const rallyPointsForMap = rallyPoints.map(function (m) {
+    const arrival = damArrival(m.lat, m.lon, discharge, rules);
+    const catchmentM = (arrival.minutes * rules.RALLY_REACTION_FRACTION / 60) * rules.WALK_SPEED_KMH * 1000;
+    return Object.assign({}, m, { params: Object.assign({}, m.params, { _catchmentRadiusM: catchmentM }) });
+  });
+
+  return {
+    totalBuildings: totalBuildings,
+    totalPeople: totalPeople,
+    evacuation: { covered: evacCovered, percent: pct(evacCovered) },
+    rally: { covered: rallyCovered, percent: pct(rallyCovered) },
+    crossings: { total: crossingFeatures.length, open: crossingsOpen, closed: crossingsClosed },
+    roadFeatures: crossingFeatures,
+    groups: [
+      { markers: evacZones, radiusField: 'radiusM', fixedRadiusM: 300, color: '#7c3aed' },
+      { markers: rallyPointsForMap, radiusField: '_catchmentRadiusM', fixedRadiusM: 500, color: '#f59e0b' },
+    ],
+  };
+}
+
+function damReleaseImpactStatRows(cov) {
+  return [
+    { value: cov.evacuation.percent + '%', suffix: 'of at-risk population covered by a time-tiered evacuation zone' },
+    { value: cov.crossings.open + ' open, ' + cov.crossings.closed + ' closed', suffix: 'bridges/crossings within the affected reach' },
+    { value: cov.rally.percent + '%', suffix: 'of at-risk residents within reach of a high-ground rally point before the wave arrives' },
+  ];
+}
+
+function damReleaseImpactVerdict(after) {
+  if (after.totalBuildings === 0) {
+    return { text: 'No buildings currently sit inside the modeled wave-arrival zone.', tone: 'neutral' };
+  }
+  const crossingsClosedPct = after.crossings.total > 0 ? Math.round((after.crossings.closed / after.crossings.total) * 100) : 100;
+  const gaps = [
+    { pct: 100 - after.evacuation.percent, text: (100 - after.evacuation.percent) + '% of at-risk buildings are outside any time-tiered evacuation zone.' },
+    { pct: 100 - after.rally.percent, text: (100 - after.rally.percent) + '% of at-risk residents can\'t reach a high-ground rally point before the wave arrives.' },
+  ];
+  if (after.crossings.total > 0) {
+    gaps.push({ pct: 100 - crossingsClosedPct, text: (100 - crossingsClosedPct) + '% of bridges/crossings in the affected reach are still open.' });
+  }
+  gaps.sort(function (a, b) { return b.pct - a.pct; });
+  const worst = gaps[0];
+  if (worst.pct <= 0) {
+    return { text: 'Every at-risk building is covered by this plan across every tracked category.', tone: 'good' };
+  }
+  return { text: worst.text, tone: worst.pct >= 50 ? 'bad' : 'warn' };
+}
+
+function buildDamReleaseResponseImpact(scenario, geoData, markers) {
+  const rules = getResponseRules(scenario);
+  const crossingCandidates = damCrossingCandidates(geoData, rules);
+  const before = computeDamReleaseResponseCoverage(scenario, geoData, [], crossingCandidates);
+  const after = computeDamReleaseResponseCoverage(scenario, geoData, markers, crossingCandidates);
+  return {
+    summaryLine: atRiskSummaryLine(after, 'the modeled wave-arrival zone'),
+    before: { statRows: damReleaseImpactStatRows(before), mapOverlay: responseImpactMapOverlay(before) },
+    after: { statRows: damReleaseImpactStatRows(after), mapOverlay: responseImpactMapOverlay(after) },
+    verdict: damReleaseImpactVerdict(after),
+  };
+}
+
 // ---------------------------------------------------------------------
 // Generic helpers for the config-driven prevention action flow.
 // ---------------------------------------------------------------------
@@ -4301,6 +4997,7 @@ export default function PlanWorkspace() {
   const [breakdownResult, setBreakdownResult] = useState(null);
   const [breakdownLoading, setBreakdownLoading] = useState(false);
   const [showBreakdown, setShowBreakdown] = useState(false);
+  const [responseImpactResult, setResponseImpactResult] = useState(null);
 
   const activeToolRef = useRef(null);
   const planTypeRef = useRef('response');
@@ -6671,6 +7368,27 @@ export default function PlanWorkspace() {
     setTimeout(function () { URL.revokeObjectURL(url); }, 2000);
   }
 
+  // River Overflow + Rainfall + Dam Release measure risk EXPOSURE
+  // (evacuation/rescue/relief/warning/rally coverage); Drainage Failure
+  // measures INFRASTRUCTURE FIXES (area addressed / overflow points
+  // warned) instead, since that scenario's actions repair the drain
+  // network rather than move people. Either way, none of these change
+  // the hazard itself, and all four reuse buildGeoData() — the exact
+  // same bundle every "Check this action" placement validator reads —
+  // so before/after are computed off real, live simulation data.
+  function buildResponseImpactReport() {
+    const geoData = buildGeoData();
+    const responseMarkers = markers.filter(function (m) { return m.planType === 'response'; });
+    const result = causeType === 'rainfall'
+      ? buildRainfallResponseImpact(geoData, responseMarkers, closedRoads)
+      : causeType === 'drainage_failure'
+        ? buildDrainageFailureResponseImpact(scenario, geoData, responseMarkers)
+        : causeType === 'dam_release'
+          ? buildDamReleaseResponseImpact(scenario, geoData, responseMarkers)
+          : buildRiverOverflowResponseImpact(scenario, geoData, responseMarkers, closedRoads);
+    setResponseImpactResult(result);
+  }
+
   if (!scenario) {
     return (
       <div style={{ padding: 40, fontFamily: 'system-ui, sans-serif' }}>
@@ -7649,6 +8367,25 @@ export default function PlanWorkspace() {
           </div>
         )}
 
+        {planType === 'response' &&
+          (currentMarkers.length > 0 || closedRoads.length > 0) &&
+          ((causeType === 'river_overflow' && floodGridStatus === 'ready') ||
+            (causeType === 'rainfall' && rainfallLayersStatus === 'ready') ||
+            (causeType === 'drainage_failure' && floodGridStatus === 'ready' && rainfallLayersStatus === 'ready') ||
+            (causeType === 'dam_release' && floodGridStatus === 'ready')) && (
+          <button
+            onClick={buildResponseImpactReport}
+            title="Compares what this plan actually covers or fixes against everything still at risk"
+            style={{
+              width: '100%', padding: '7px 6px', borderRadius: 9, border: '1px solid #0d9488',
+              background: '#f0fdfa', color: '#0d9488', fontSize: 11, fontWeight: 700, cursor: 'pointer',
+              marginBottom: 10,
+            }}
+          >
+            📊 Response Impact Report
+          </button>
+        )}
+
         {currentMarkers.length === 0 && currentEmbankments.length === 0 && currentNotes.length === 0 && closedRoads.length === 0 && (
           <div style={{ fontSize: 11.5, color: '#94a3b8' }}>
             Nothing added yet. Pick an action, then click the map.
@@ -7926,6 +8663,15 @@ export default function PlanWorkspace() {
           );
         })()}
       </div>
+
+      {responseImpactResult && (
+        <ResponseImpactModal
+          scenario={scenario}
+          result={responseImpactResult}
+          onSeeFullReport={function () { setResponseImpactResult(null); handlePrintReport(); }}
+          onClose={function () { setResponseImpactResult(null); }}
+        />
+      )}
 
       {preventionResult && !showBreakdown && (
         <div
