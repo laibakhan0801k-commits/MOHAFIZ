@@ -1,186 +1,271 @@
-﻿"use client";
+import Link from "next/link";
+import SiteNav from "@/components/SiteNav";
+import SiteFooter from "@/components/SiteFooter";
+import GetStartedButton from "@/components/GetStartedButton";
 
-import { useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
-import { Space_Grotesk } from "next/font/google";
+// Tailwind's scanner only picks up complete, static class-name strings —
+// building "text-" + color at render time would silently compile to
+// nothing. Writing the full class names out here keeps every combination
+// visible to the scanner.
+const SCENARIOS = [
+  {
+    name: "River Overflow",
+    line: "Models the nullah breaching its banks, using real elevation data.",
+    border: "border-[#2b547e]",
+    bg: "bg-blue-50",
+    dot: "bg-[#2b547e]",
+    text: "text-[#2b547e]",
+  },
+  {
+    name: "Rainfall",
+    line: "Flash flooding when monsoon rain outpaces urban drainage.",
+    border: "border-[#2b547e]",
+    bg: "bg-blue-50",
+    dot: "bg-[#2b547e]",
+    text: "text-[#2b547e]",
+  },
+  {
+    name: "Drainage Failure",
+    line: "Blocked drains and encroached nullahs — the most common local cause.",
+    border: "border-[#2b547e]",
+    bg: "bg-blue-50",
+    dot: "bg-[#2b547e]",
+    text: "text-[#2b547e]",
+  },
+  {
+    name: "Dam Release",
+    line: "Rawal Dam's spillway releases into Korang Nullah, with real advance warning.",
+    border: "border-[#2b547e]",
+    bg: "bg-blue-50",
+    dot: "bg-[#2b547e]",
+    text: "text-[#2b547e]",
+  },
+];
 
-const display = Space_Grotesk({
-  subsets: ["latin"],
-  weight: ["500", "700"],
-});
-
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
+const WHAT_IF_STEPS = [
+  {
+    n: "01",
+    title: "See the shape of risk",
+    body: "Translate a complex basin into a picture people can read together.",
+  },
+  {
+    n: "02",
+    title: "Find the decision point",
+    body: "Understand which small action gives your family or district more room.",
+  },
+  {
+    n: "03",
+    title: "Move with confidence",
+    body: "Share a clear next step with the people who need to act.",
+  },
+];
 
 export default function Home() {
-  const router = useRouter();
-  const [mode, setMode] = useState("login");
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
-  const [status, setStatus] = useState("idle");
-  const [message, setMessage] = useState("");
-  const [token, setToken] = useState(null);
-
-  useEffect(() => {
-    if (localStorage.getItem("mohafiz_token")) {
-      router.replace("/map");
-    }
-  }, [router]);
-
-  async function handleSubmit(e) {
-    e.preventDefault();
-    setStatus("loading");
-    setMessage("");
-    setToken(null);
-
-    try {
-      const res = await fetch(API_URL + "/" + mode, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email: email, password: password }),
-      });
-      const data = await res.json();
-
-      if (!res.ok) {
-        throw new Error(data.detail || "Something went wrong.");
-      }
-
-      if (mode === "login") {
-        setToken(data.access_token);
-        setStatus("success");
-        setMessage("Logged in. Redirecting...");
-        localStorage.setItem("mohafiz_token", data.access_token);
-        localStorage.setItem(
-          "mohafiz_user",
-          JSON.stringify({ id: data.user_id, email: data.email })
-        );
-        router.push("/map");
-      } else {
-        setStatus("success");
-        setMessage("Account created — you can log in now.");
-        setMode("login");
-        setPassword("");
-      }
-    } catch (err) {
-      setStatus("error");
-      setMessage(err.message);
-    }
-  }
-
   return (
-    <div className="flex min-h-screen w-full bg-[#080D18] text-[#E7EEF7]">
-      <div className="relative hidden w-1/2 overflow-hidden bg-gradient-to-br from-[#0B1220] to-[#0F1E30] md:flex md:flex-col md:justify-between md:p-12">
+    <div className="bg-paper">
+      <SiteNav />
+
+      {/* Hero */}
+      <section className="relative overflow-hidden bg-ink text-paper px-6 py-24">
         <svg
-          className="pointer-events-none absolute inset-0 h-full w-full opacity-[0.18]"
-          viewBox="0 0 800 900"
+          className="pointer-events-none absolute inset-0 w-full h-full opacity-40"
+          viewBox="0 0 1200 500"
           preserveAspectRatio="none"
           aria-hidden="true"
         >
-          <path d="M-20,140 C120,90 260,190 400,150 C540,110 660,200 820,150" stroke="#2DD4BF" strokeWidth="1" fill="none" />
-          <path d="M-20,230 C140,180 260,270 420,230 C560,195 680,270 820,230" stroke="#2DD4BF" strokeWidth="1" fill="none" opacity="0.8" />
-          <path d="M-20,330 C130,290 280,360 420,320 C560,280 700,350 820,320" stroke="#2DD4BF" strokeWidth="1" fill="none" opacity="0.6" />
-          <path d="M-20,430 C150,400 260,460 420,430 C580,400 680,460 820,430" stroke="#2DD4BF" strokeWidth="1" fill="none" opacity="0.5" />
-          <path d="M-20,540 C140,510 280,570 420,540 C560,510 690,570 820,540" stroke="#F5A623" strokeWidth="1" fill="none" opacity="0.35" />
-          <path d="M-20,650 C150,620 280,680 420,650 C570,620 690,680 820,650" stroke="#F5A623" strokeWidth="1" fill="none" opacity="0.25" />
+          <path
+            className="contour-line stroke-flow"
+            d="M-20,110 C220,60 460,160 700,110 C900,70 1060,150 1220,100"
+            strokeWidth="1"
+            fill="none"
+          />
+          <path
+            className="contour-line stroke-flow"
+            d="M-20,210 C240,160 470,250 720,200 C920,165 1070,240 1220,190"
+            strokeWidth="1"
+            fill="none"
+            opacity="0.7"
+          />
+          <path
+            className="contour-line stroke-line"
+            d="M-20,310 C230,270 480,340 720,300 C920,270 1080,330 1220,290"
+            strokeWidth="1"
+            fill="none"
+            opacity="0.5"
+          />
         </svg>
 
-        <div className="relative z-10">
-          <h1 className={display.className + " text-3xl font-bold tracking-tight text-[#E7EEF7]"}>
-            MOHAFIZ
-          </h1>
-          <p className="mt-3 max-w-sm text-sm leading-6 text-[#7C8BA3]">
-            Flood response digital twin for the Nullah Leh / Korang Nullah
-            corridor — Saidpur to Blue Area, Islamabad.
+        <div className="relative max-w-3xl mx-auto text-center">
+          <h1 className="font-display text-5xl font-medium">Mohafiz</h1>
+          <p className="font-display text-xl text-flow mt-2">Pakistan&rsquo;s what if engine</p>
+          <p className="font-body text-lg mt-6 max-w-xl mx-auto opacity-80">
+            Turn real flood data for Islamabad H-8/H-9 into a place-by-place
+            response plan — before the water gets there.
+          </p>
+          <GetStartedButton className="mt-8" />
+        </div>
+      </section>
+
+      {/* Start with "what if" */}
+      <section className="bg-paper px-6 py-16">
+        <div className="max-w-5xl mx-auto">
+          <div className="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-3 mb-8">
+            <div>
+              <div className="font-body text-xs font-semibold tracking-wide text-flow uppercase">
+                <span className="inline-block w-1.5 h-1.5 rounded-full bg-flow mr-2 align-middle" />
+                Try the thinking
+              </div>
+              <h2 className="font-display text-3xl text-ink mt-2">Start with &ldquo;what if&rdquo;?</h2>
+            </div>
+            <p className="font-body text-sm text-ink/60 max-w-xs sm:text-right">
+              Every useful plan begins somewhere specific.
+            </p>
+          </div>
+
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 items-center">
+            <div className="mh-card mh-fade-in bg-ink text-paper rounded-2xl px-6 py-6">
+              <span className="inline-block font-body text-[10px] font-semibold tracking-wide uppercase bg-white/10 text-paper/70 rounded-full px-3 py-1">
+                A question for Mohafiz
+              </span>
+              <h3 className="font-display text-xl mt-4">What if the nullah rises 1 metre?</h3>
+              <div className="flex flex-wrap gap-2 mt-5">
+                <span className="font-body text-xs bg-lime text-ink rounded-full px-3 py-1.5">
+                  What if the nullah rises 1 metre?
+                </span>
+                <span className="font-body text-xs bg-white/10 text-paper/80 rounded-full px-3 py-1.5">
+                  Which roads stay open near H-9?
+                </span>
+                <span className="font-body text-xs bg-white/10 text-paper/80 rounded-full px-3 py-1.5">
+                  Where should our community shelter?
+                </span>
+              </div>
+              <Link
+                href="/how-it-works"
+                className="inline-block mt-5 font-body text-sm text-lime hover:opacity-80 transition"
+              >
+                See a grounded answer →
+              </Link>
+            </div>
+
+            <div className="space-y-6">
+              {WHAT_IF_STEPS.map(function (step) {
+                return (
+                  <div key={step.n} className="mh-fade-in flex gap-4">
+                    <span className="font-mono text-sm text-flow">{step.n}</span>
+                    <div>
+                      <h4 className="font-display text-base text-ink">{step.title}</h4>
+                      <p className="font-body text-sm text-ink/60 mt-1">{step.body}</p>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {/* Why this matters */}
+      <section className="bg-paper px-6 py-16">
+        <div className="max-w-2xl mx-auto mh-card mh-fade-in bg-white/70 rounded-xl px-6 py-8">
+          <p className="font-body text-base leading-relaxed text-ink/80">
+            Islamabad and Rawalpindi flood for different reasons — a river
+            overflowing its banks, monsoon rain that outpaces the drains,
+            storm drains blocked by encroachment and garbage, even scheduled
+            releases from Rawal Dam into Korang Nullah. Mohafiz models all
+            four, using real elevation data, the actual road network, and
+            Pakistan&rsquo;s own PMD flood thresholds — not a generic
+            simulation.
           </p>
         </div>
+      </section>
 
-        <div className="relative z-10 font-mono text-xs text-[#4C6079]">
-          <div className="mb-1 text-[#7C8BA3]">BOUNDING BOX</div>
-          <div>N 33.7350° &nbsp; S 33.6700°</div>
-          <div>E 73.0850° &nbsp; W 73.0100°</div>
+      {/* Scenarios — 4 cards */}
+      <section className="bg-paper px-6 py-16">
+        <div className="max-w-6xl mx-auto">
+          <h2 className="font-display text-2xl text-ink mb-6">Scenarios Mohafiz models</h2>
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+            {SCENARIOS.map(function (s) {
+              return (
+                <div
+                  key={s.name}
+                  className={"mh-card mh-fade-in border-2 " + s.border + " rounded-xl " + s.bg + " px-5 py-4"}
+                >
+                  <div className="flex items-center gap-2">
+                    <span className={"w-3 h-3 rounded-full " + s.dot} />
+                    <h3 className={"font-display text-lg " + s.text}>{s.name}</h3>
+                  </div>
+                  <p className="font-body text-sm text-ink/70 mt-2">{s.line}</p>
+                </div>
+              );
+            })}
+          </div>
         </div>
-      </div>
+      </section>
 
-      <div className="flex w-full flex-col items-center justify-center px-6 py-16 md:w-1/2">
-        <div className="w-full max-w-sm">
-          <div className={display.className + " mb-1 text-xl font-medium md:hidden"}>
-            MOHAFIZ
+      {/* The Real Story */}
+      <section className="bg-paper px-6 py-16">
+        <div className="max-w-3xl mx-auto mh-card mh-fade-in border-2 border-[#2b547e] bg-blue-50 rounded-xl px-6 py-8">
+          <h2 className="font-display text-2xl mb-1 text-ink">The Real Story</h2>
+          <p className="font-body text-xs text-ink/50 mb-6">
+            Pakistan&rsquo;s 2025 monsoon season, by the numbers — NDMA / OCHA.
+          </p>
+
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-6">
+            <div className="text-center">
+              <div className="font-mono text-2xl font-medium text-alert">1,037+</div>
+              <div className="font-body text-xs text-ink/60 mt-1">Lives lost</div>
+            </div>
+            <div className="text-center">
+              <div className="font-mono text-2xl font-medium text-alert">6.9M</div>
+              <div className="font-body text-xs text-ink/60 mt-1">People affected</div>
+            </div>
+            <div className="text-center">
+              <div className="font-mono text-2xl font-medium text-alert">229,700+</div>
+              <div className="font-body text-xs text-ink/60 mt-1">Homes damaged or destroyed</div>
+            </div>
+            <div className="text-center">
+              <div className="font-mono text-2xl font-medium text-alert">3M</div>
+              <div className="font-body text-xs text-ink/60 mt-1">People displaced</div>
+            </div>
           </div>
 
-          <div className="mb-8 flex gap-1 rounded-lg border border-white/[.08] bg-white/[.02] p-1">
-            <button
-              type="button"
-              onClick={function () { setMode("login"); setStatus("idle"); setMessage(""); }}
-              className={"flex-1 rounded-md py-2 text-sm font-medium transition-colors " + (mode === "login" ? "bg-[#2DD4BF] text-[#06231F]" : "text-[#7C8BA3] hover:text-[#E7EEF7]")}
-            >
-              Log in
-            </button>
-            <button
-              type="button"
-              onClick={function () { setMode("signup"); setStatus("idle"); setMessage(""); }}
-              className={"flex-1 rounded-md py-2 text-sm font-medium transition-colors " + (mode === "signup" ? "bg-[#2DD4BF] text-[#06231F]" : "text-[#7C8BA3] hover:text-[#E7EEF7]")}
-            >
-              Sign up
-            </button>
-          </div>
-
-          <form onSubmit={handleSubmit} className="space-y-4">
-            <div>
-              <label htmlFor="email" className="mb-1.5 block text-xs font-medium text-[#7C8BA3]">
-                Email
-              </label>
-              <input
-                id="email"
-                type="email"
-                required
-                autoComplete="email"
-                value={email}
-                onChange={function (e) { setEmail(e.target.value); }}
-                className="w-full rounded-lg border border-white/[.08] bg-white/[.03] px-3.5 py-2.5 text-sm text-[#E7EEF7] outline-none placeholder:text-[#4C6079] focus:border-[#2DD4BF]/50 focus:ring-2 focus:ring-[#2DD4BF]/20"
-                placeholder="you@example.com"
-              />
-            </div>
-
-            <div>
-              <label htmlFor="password" className="mb-1.5 block text-xs font-medium text-[#7C8BA3]">
-                Password
-              </label>
-              <input
-                id="password"
-                type="password"
-                required
-                minLength={8}
-                autoComplete={mode === "login" ? "current-password" : "new-password"}
-                value={password}
-                onChange={function (e) { setPassword(e.target.value); }}
-                className="w-full rounded-lg border border-white/[.08] bg-white/[.03] px-3.5 py-2.5 text-sm text-[#E7EEF7] outline-none placeholder:text-[#4C6079] focus:border-[#2DD4BF]/50 focus:ring-2 focus:ring-[#2DD4BF]/20"
-                placeholder="••••••••"
-              />
-            </div>
-
-            <button
-              type="submit"
-              disabled={status === "loading"}
-              className="w-full rounded-lg bg-[#2DD4BF] py-2.5 text-sm font-semibold text-[#06231F] transition-opacity hover:opacity-90 disabled:opacity-50"
-            >
-              {status === "loading" ? "Working..." : mode === "login" ? "Log in" : "Create account"}
-            </button>
-          </form>
-
-          {message && (
-            <div
-              className={"mt-4 rounded-lg border px-3.5 py-2.5 text-sm " + (status === "error" ? "border-[#FB7185]/30 bg-[#FB7185]/10 text-[#FB7185]" : "border-[#2DD4BF]/30 bg-[#2DD4BF]/10 text-[#2DD4BF]")}
-            >
-              {message}
-            </div>
-          )}
-
-          {token && (
-            <div className="mt-3 rounded-lg border border-white/[.08] bg-white/[.02] px-3.5 py-2.5 font-mono text-xs text-[#7C8BA3]">
-              token: {token.slice(0, 24)}...
-            </div>
-          )}
+          <p className="font-body text-base leading-relaxed text-ink/80">
+            Punjab and Khyber Pakhtunkhwa took the worst of it — Punjab&rsquo;s
+            worst flooding in four decades, KP alone recording over 500
+            deaths. The 2026 season is already underway, and by late July had
+            killed over
+            <span className="font-mono font-medium text-alert"> 100 </span>
+            people, with the worst of the season still ahead. Most of the
+            communities behind these numbers had no plan in place before the
+            water arrived.
+          </p>
+          <Link href="/how-it-works" className="inline-block mt-6 font-body text-sm text-flow underline">
+            Read the full walkthrough
+          </Link>
         </div>
-      </div>
+      </section>
+
+      {/* Let's make room for better decisions */}
+      <section className="bg-paper px-6 py-16">
+        <div className="max-w-5xl mx-auto mh-card mh-fade-in bg-white/70 rounded-2xl px-8 py-10 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-6">
+          <div>
+            <div className="font-body text-xs font-semibold tracking-wide text-flow uppercase">
+              <span className="inline-block w-1.5 h-1.5 rounded-full bg-flow mr-2 align-middle" />
+              Readiness is shared
+            </div>
+            <h2 className="font-display text-2xl sm:text-3xl text-ink mt-2 max-w-md">
+              Let&rsquo;s make room for better decisions.
+            </h2>
+            <p className="font-body text-sm text-ink/60 mt-2 max-w-sm">
+              Explore Mohafiz and see how a local what-if can turn uncertainty
+              into a next step.
+            </p>
+          </div>
+          <GetStartedButton label="Explore the engine" variant="dark" />
+        </div>
+      </section>
+
+      <SiteFooter />
     </div>
   );
 }
