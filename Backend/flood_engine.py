@@ -155,6 +155,110 @@ def severity_to_water_level(severity: float) -> float:
     effective_percentile = (severity / 100) * MAX_FLOOD_PERCENTILE
     return float(np.percentile(valid, effective_percentile))
 
+# ---------------------------------------------------------------------
+# PMD / FFD 24-hour rainfall accumulation bands.
+#
+# Rainfall severity is picked as a BAND, not as an mm/hr feed. These are
+# the bands Pakistan Meteorological Department actually forecasts and
+# warns on, so a planner selects the same thing they would be told.
+#
+# plan_mm is the accumulation the model plans for within each band: the
+# TOP of the band, because a plan built for the bottom of a band fails
+# for every event in the upper part of it. The open-ended top band has no
+# upper bound, so 200mm is used -- a stated assumption, not a measurement.
+# ---------------------------------------------------------------------
+PMD_RAINFALL_BANDS = {
+    "light": {
+        "label": "Light",
+        "range_label": "\u2264 10mm / 24hr",
+        "min_mm": 0.0,
+        "max_mm": 10.0,
+        "plan_mm": 10.0,
+        "order": 1,
+    },
+    "moderate": {
+        "label": "Moderate",
+        "range_label": "10.1 \u2013 30mm / 24hr",
+        "min_mm": 10.1,
+        "max_mm": 30.0,
+        "plan_mm": 30.0,
+        "order": 2,
+    },
+    "heavy": {
+        "label": "Heavy",
+        "range_label": "30.1 \u2013 70mm / 24hr",
+        "min_mm": 30.1,
+        "max_mm": 70.0,
+        "plan_mm": 70.0,
+        "order": 3,
+    },
+    "very_heavy": {
+        "label": "Very heavy",
+        "range_label": "70.1 \u2013 150mm / 24hr",
+        "min_mm": 70.1,
+        "max_mm": 150.0,
+        "plan_mm": 150.0,
+        "order": 4,
+    },
+    "extremely_heavy": {
+        "label": "Extremely heavy",
+        "range_label": "> 150mm / 24hr",
+        "min_mm": 150.1,
+        "max_mm": None,
+        "plan_mm": 200.0,
+        "order": 5,
+    },
+}
+
+RAINFALL_BAND_ORDER = ["light", "moderate", "heavy", "very_heavy", "extremely_heavy"]
+
+
+def rainfall_band(band: str):
+    """The PMD band record, or a clear error naming the valid options."""
+    key = (band or "").strip().lower()
+    if key not in PMD_RAINFALL_BANDS:
+        raise ValueError(
+            "Unknown rainfall band '%s'. Expected one of: %s"
+            % (band, ", ".join(RAINFALL_BAND_ORDER))
+        )
+    return PMD_RAINFALL_BANDS[key]
+
+
+def rainfall_band_plan_mm(band: str) -> float:
+    """The 24-hour accumulation this band is planned against."""
+    return rainfall_band(band)["plan_mm"]
+
+
+def rainfall_band_severity(band: str) -> float:
+    """
+    Severity for a PMD band, on the same 0-100 scale every other cause
+    type uses, derived from the band's plan_mm through the SAME
+    calibration as rainfall_severity() below -- so the real-event anchor
+    (the Aug 2026 spell, ~146mm) still means what it did.
+
+    Note that very_heavy and extremely_heavy both saturate the 0-100
+    severity scale, because that scale tops out at the real reference
+    event. They are still different floods: extremely_heavy plans for
+    200mm rather than 150mm, so the volume model puts more water on the
+    ground. Severity is a label; plan_mm is what drives the physics.
+    """
+    return _rainfall_severity_from_total(rainfall_band_plan_mm(band))
+
+
+def _rainfall_severity_from_total(raw_total_mm: float, runoff_coefficient: float = 0.6) -> float:
+    """Shared core so the band path and the legacy intensity path cannot drift."""
+    THRESHOLD_MM = 15
+    REFERENCE_MM = 150
+
+    if raw_total_mm <= THRESHOLD_MM:
+        return 0
+
+    effective_excess = (raw_total_mm - THRESHOLD_MM) * runoff_coefficient
+    max_effective_excess = (REFERENCE_MM - THRESHOLD_MM) * runoff_coefficient
+
+    return min(100, (effective_excess / max_effective_excess) * 100)
+
+
 def rainfall_severity(intensity_mm_per_hr: float, duration_hr: float, runoff_coefficient: float = 0.6) -> float:
     """
     REAL-WORLD CALIBRATION (checked against actual data, not guesses):
@@ -172,18 +276,7 @@ def rainfall_severity(intensity_mm_per_hr: float, duration_hr: float, runoff_coe
     - runoff_coefficient scales how much rain past the threshold
       actually becomes damaging surface flow vs. soaking in.
     """
-    THRESHOLD_MM = 15
-    REFERENCE_MM = 150
-
-    raw_total_mm = intensity_mm_per_hr * duration_hr
-
-    if raw_total_mm <= THRESHOLD_MM:
-        return 0
-
-    effective_excess = (raw_total_mm - THRESHOLD_MM) * runoff_coefficient
-    max_effective_excess = (REFERENCE_MM - THRESHOLD_MM) * runoff_coefficient
-
-    return min(100, (effective_excess / max_effective_excess) * 100)
+    return _rainfall_severity_from_total(intensity_mm_per_hr * duration_hr, runoff_coefficient)
 
 
 # ---------------------------------------------------------------------

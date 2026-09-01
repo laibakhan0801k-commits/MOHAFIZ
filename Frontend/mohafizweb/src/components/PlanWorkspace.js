@@ -1,4 +1,4 @@
-﻿'use client';
+'use client';
 
 import { useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
@@ -25,62 +25,60 @@ function filterToolsByCauseType(tools, causeType) {
 // implemented:false are shown but disabled, because a shelter or a
 // helipad placed with NO validation is worse than one you cannot place
 // yet — it looks checked when nothing checked it.
+// River Overflow's Response Plan panel — trimmed to 5 actions. Two of the
+// original 10 are merges (marked below); the other 5 (food & water
+// distribution, dewatering pump, helicopter landing zone, plus the old
+// separate close-flooded-road and traffic-diversion pins) are dropped
+// entirely, not just hidden. Their resolver functions are left in the
+// file, unused, rather than deleted, so nothing else in this file needs
+// to move.
 const RESPONSE_TOOLS = [
   {
-    key: 'closeRoad',
-    label: 'Close flooded road',
-    emoji: '🚧',
-    color: '#dc2626',
-    kind: 'road',
+    key: 'warningPoint',
+    label: 'Warning announcement point',
+    emoji: '📢',
+    color: '#f59e0b',
+    kind: 'area',
     phase: 1,
     implemented: true,
-    targetType: 'floodedRoad',
-    hint: 'Click ON a road that is under water — rejects roads that are dry, and roads whose water is too shallow to actually stop traffic',
-    effectLabel: 'Marks the road impassable for this response plan',
+    targetType: 'warningPoint',
+    hint: 'Click a mosque or public point for loudspeaker warnings — snaps onto a real one if it is within 80m. Set the coverage radius to see what it reaches.',
+    effectLabel: 'Loudspeaker / siren coverage for residents',
     formFields: [
-      { key: 'durationHr', label: 'Expected duration', type: 'number', optional: true, min: 1, max: 168, step: 1, unit: 'hr', default: '' },
+      { key: 'coverageRadiusM', label: 'Coverage radius', type: 'number', min: 50, max: 3000, step: 25, unit: 'm', default: 400 },
     ],
-    submitLabel: 'Close this road',
+    submitLabel: 'Add warning point',
     computeSummary: function (pending, forms, geoData) {
       const rules = getResponseRules(geoData.scenario);
-      const lines = [
-        { label: 'Road', value: pending.roadName || String(pending.roadHighwayType).replace(/_/g, ' ') },
-        { label: 'Water on road', value: formatDepth(pending.depthM), tone: 'bad' },
-        { label: 'Impassable above', value: formatDepth(rules.IMPASSABLE_ROAD_DEPTH_M) },
-      ];
-      if (pending.floodedRoadIndex === null || pending.floodedRoadIndex === undefined) {
-        lines.push({ label: 'Note', value: 'Not one of the roads the simulation flagged — closed on measured depth', tone: 'warn' });
-      }
-      return lines;
-    },
-  },
-  {
-    key: 'boatLaunch',
-    label: 'Boat launch point',
-    emoji: '🛟',
-    color: '#0ea5e9',
-    kind: 'point',
-    phase: 1,
-    implemented: true,
-    targetType: 'boatLaunch',
-    hint: 'Click where rescue boats go in — needs floodwater at or beside the point AND a road close enough to get a trailer there',
-    effectLabel: 'Deployment point for boat rescue teams',
-    formFields: [
-      { key: 'boatCount', label: 'Boats available', type: 'number', optional: true, min: 1, max: 50, step: 1, unit: '', default: '' },
-    ],
-    submitLabel: 'Add launch point',
-    computeSummary: function (pending, forms, geoData) {
       const lines = [];
-      if (pending.atWaterEdge) {
-        lines.push({ label: 'Water', value: Math.round(pending.waterDistanceM) + 'm away, ' + formatDepth(pending.maxDepthNearbyM) + ' deep' });
+
+      if (pending.snappedFacilityName) {
+        lines.push({
+          label: 'Snapped to',
+          value: pending.snappedFacilityName + ' (' + amenityLabel(pending.snappedFacilityAmenity) + ', ' +
+            Math.round(pending.snapDistanceM) + 'm from your click)',
+          tone: 'good',
+        });
       } else {
-        lines.push({ label: 'Water at point', value: formatDepth(pending.depthM) + ' deep' });
+        lines.push({ label: 'Site', value: 'open point — no mosque or public building within ' + rules.WARNING_SNAP_MAX_M + 'm' });
       }
-      lines.push({
-        label: 'Road access',
-        value: (pending.roadName || String(pending.roadHighwayType).replace(/_/g, ' ')) + ', ' + Math.round(pending.roadDistanceM) + 'm',
-        tone: 'good',
-      });
+
+      const radius = Number(forms.coverageRadiusM);
+      if (!radius || radius <= 0) {
+        lines.push({ label: 'Coverage', value: 'enter a radius above 0 to see what it reaches', tone: 'warn' });
+      } else {
+        const cov = computeWarningCoverage(pending.lat, pending.lng, radius, geoData);
+        lines.push({ label: 'Buildings covered', value: String(cov.buildingCount) });
+        lines.push({ label: 'People (rough estimate)', value: '≈ ' + cov.estimatedPeople + ' at 6.5 per building' });
+      }
+
+      if (pending.selfFlooded) {
+        lines.push({
+          label: 'Warning',
+          value: 'this point is itself under ' + formatDepth(pending.selfFloodDepthM) + ' of water',
+          tone: 'warn',
+        });
+      }
       return lines;
     },
   },
@@ -123,27 +121,124 @@ const RESPONSE_TOOLS = [
       return lines;
     },
   },
-
-  // ---- Phase 2: safe-zone logistics ----
   {
-    key: 'reliefCamp',
-    label: 'Relief camp / shelter',
+    // MERGED: "Close flooded road" + "Traffic diversion point" into one
+    // pin. Key stays 'closeRoad' so the existing tested resolver
+    // (resolveCloseFloodedRoad — road + depth check, unchanged) and the
+    // closedRoads bucket it feeds into are untouched. What is new: while
+    // the confirm popup is open, the same real directed-road-network
+    // /diversion-check the old standalone diversion tool already used is
+    // run against THIS road closing itself, to answer "with this closed,
+    // does a detour still exist?" — and unlike the old diversion tool,
+    // that answer is now a hard gate on submission, not advisory.
+    key: 'closeRoad',
+    label: 'Road closure & diversion point',
+    emoji: '🚧',
+    color: '#dc2626',
+    kind: 'road',
+    phase: 1,
+    implemented: true,
+    targetType: 'floodedRoad',
+    hint: 'Click where a road enters the flooded segment — rejects roads that are dry, roads whose water is too shallow to matter, and closures with no alternate route around them.',
+    effectLabel: 'Closes the road and marks the diversion at the same point',
+    formFields: [
+      { key: 'durationHr', label: 'Expected duration', type: 'number', optional: true, min: 1, max: 168, step: 1, unit: 'hr', default: '' },
+    ],
+    submitLabel: 'Close this road',
+    computeSummary: function (pending, forms, geoData) {
+      const rules = getResponseRules(geoData.scenario);
+      const lines = [
+        { label: 'Road', value: pending.roadName || String(pending.roadHighwayType).replace(/_/g, ' ') },
+        { label: 'Water on road', value: formatDepth(pending.depthM), tone: 'bad' },
+        { label: 'Impassable above', value: formatDepth(rules.IMPASSABLE_ROAD_DEPTH_M) },
+      ];
+      if (pending.floodedRoadIndex === null || pending.floodedRoadIndex === undefined) {
+        lines.push({ label: 'Note', value: 'Not one of the roads the simulation flagged — closed on measured depth', tone: 'warn' });
+      }
+
+      // Real directed-graph check: with this road closed, is there still
+      // a way from one side to the other that stays outside the flood?
+      // This is what actually decides whether the placement can be
+      // submitted — see the submit button below.
+      const dc = geoData.diversionCheck;
+      if (!dc) {
+        // nothing to add yet
+      } else if (dc.loading) {
+        lines.push({ label: 'Alternate route', value: 'checking whether a detour exists…' });
+      } else if (dc.error) {
+        lines.push({ label: 'Alternate route', value: 'could not check (' + dc.error + ') — cannot confirm a detour exists', tone: 'warn' });
+      } else if (!dc.checked) {
+        lines.push({ label: 'Alternate route', value: dc.reason || 'not verifiable for this road', tone: 'warn' });
+      } else {
+        lines.push(dc.alternative_exists
+          ? { label: 'Alternate route', value: 'a detour outside the flood exists — this closure can be added', tone: 'good' }
+          : { label: 'Alternate route', value: 'NO detour exists — closing this road would cut this area off entirely', tone: 'critical' });
+      }
+      return lines;
+    },
+  },
+  {
+    key: 'boatLaunch',
+    label: 'Boat launch point',
+    emoji: '🛟',
+    color: '#0ea5e9',
+    kind: 'point',
+    phase: 1,
+    implemented: true,
+    targetType: 'boatLaunch',
+    hint: 'Click where rescue boats go in — needs floodwater at or beside the point AND a road close enough to get a trailer there',
+    effectLabel: 'Deployment point for boat rescue teams',
+    formFields: [
+      { key: 'boatCount', label: 'Boats available', type: 'number', optional: true, min: 1, max: 50, step: 1, unit: '', default: '' },
+    ],
+    submitLabel: 'Add launch point',
+    computeSummary: function (pending, forms, geoData) {
+      const lines = [];
+      if (pending.atWaterEdge) {
+        lines.push({ label: 'Water', value: Math.round(pending.waterDistanceM) + 'm away, ' + formatDepth(pending.maxDepthNearbyM) + ' deep' });
+      } else {
+        lines.push({ label: 'Water at point', value: formatDepth(pending.depthM) + ' deep' });
+      }
+      lines.push({
+        label: 'Road access',
+        value: (pending.roadName || String(pending.roadHighwayType).replace(/_/g, ' ')) + ', ' + Math.round(pending.roadDistanceM) + 'm',
+        tone: 'good',
+      });
+      return lines;
+    },
+  },
+  {
+    // MERGED: "Relief camp / shelter" + "Medical / first-aid post" into
+    // one pin with two independent optional capacity fields, so a single
+    // point can be a shelter, a medical post, or both. Placement rule:
+    // outside the flood polygon, on an open road, within walking
+    // distance of an existing evacuation zone.
+    key: 'reliefMedicalPost',
+    label: 'Relief camp / medical post',
     emoji: '🏕️',
     color: '#16a34a',
     kind: 'point',
     phase: 2,
     implemented: true,
-    targetType: 'reliefCamp',
-    safetyNoun: 'shelter',
-    hint: 'Click ground clear of the flood — snaps onto a nearby school or community building if there is one. Clicks in or beside the water are always rejected.',
-    effectLabel: 'Shelter site for displaced families',
+    targetType: 'reliefMedicalPost',
+    safetyNoun: 'relief/medical point',
+    hint: 'Requires a priority evacuation zone already placed nearby. Must sit outside the flood, on an open road, walkable from that zone — snaps onto a real school/shelter if one close by is itself safe.',
+    effectLabel: 'Shelter and/or field medical post serving a nearby evacuation zone',
     formFields: [
-      { key: 'capacity', label: 'Capacity', type: 'number', min: 1, max: 20000, step: 10, unit: 'people', default: 200 },
+      { key: 'shelterCapacity', label: 'Shelter capacity', type: 'number', optional: true, min: 1, max: 20000, step: 10, unit: 'people', default: '' },
+      { key: 'medicalCapacity', label: 'Medical capacity', type: 'number', optional: true, min: 1, max: 5000, step: 5, unit: 'patients', default: '' },
     ],
-    submitLabel: 'Add shelter',
+    submitLabel: 'Add relief / medical point',
     computeSummary: function (pending, forms, geoData) {
       const rules = getResponseRules(geoData.scenario);
-      const lines = [];
+      const lines = [
+        { label: 'Evacuation zone', value: Math.round(pending.nearestZoneM) + 'm away', tone: 'good' },
+        {
+          label: 'Road access',
+          value: (pending.roadName || amenityLabel(pending.roadHighwayType)) + ', ' + Math.round(pending.roadDistanceM) + 'm',
+          tone: 'good',
+        },
+      ];
       if (pending.snappedFacilityName) {
         lines.push({
           label: 'Snapped to',
@@ -157,20 +252,168 @@ const RESPONSE_TOOLS = [
         lines.push({ label: 'Site', value: 'Open ground — no mapped school or shelter within ' + rules.SHELTER_SNAP_MAX_M + 'm' });
       }
       lines.push(floodClearanceLine(pending.nearestFloodM, rules));
+      if (pending.nearestHospitalM === null || pending.nearestHospitalM === undefined) {
+        lines.push({ label: 'Nearest hospital', value: 'none found in the facilities layer', tone: 'warn' });
+      } else {
+        const dist = pending.nearestHospitalM >= 1000
+          ? (pending.nearestHospitalM / 1000).toFixed(1) + 'km'
+          : Math.round(pending.nearestHospitalM) + 'm';
+        lines.push({
+          label: 'Nearest hospital',
+          value: pending.nearestHospitalName + ', ' + dist + ' away',
+          tone: pending.nearestHospitalM < 300 ? 'warn' : 'good',
+        });
+      }
+      return lines;
+    },
+  },
+];
+
+// ---------------------------------------------------------------------
+// RAINFALL (pluvial) response actions.
+//
+// Deliberately a SEPARATE list, not a filtered view of RESPONSE_TOOLS —
+// rainfall floods low points anywhere in the sector via drainage
+// overwhelm, not a flood-extent polygon around the nullah, so it needs
+// its own six actions with their own validation. See the resolveRainXxx
+// functions and RESPONSE_RULES.rainfall below.
+// ---------------------------------------------------------------------
+const RAINFALL_RESPONSE_TOOLS = [
+  {
+    key: 'rainWarning',
+    label: 'Warning announcement point',
+    emoji: '📢',
+    color: '#f59e0b',
+    kind: 'area',
+    implemented: true,
+    targetType: 'rainWarning',
+    hint: 'Valid once the forecast reaches Moderate (10.1mm+/24hr) — this is a broadcast point, so it can sit anywhere reachable, not just near a risk zone. Snaps to a real mosque/school within 80m.',
+    effectLabel: 'Loudspeaker / siren coverage for residents',
+    formFields: [
+      { key: 'coverageRadiusM', label: 'Coverage radius', type: 'number', min: 50, max: 3000, step: 25, unit: 'm', default: 400 },
+    ],
+    submitLabel: 'Add warning point',
+    computeSummary: function (pending, forms, geoData) {
+      const rules = getResponseRules(geoData.scenario);
+      const lines = [
+        { label: 'Forecast band', value: rainfallBandLabel(geoData.scenario), tone: 'good' },
+      ];
+      if (pending.snappedFacilityName) {
+        lines.push({
+          label: 'Snapped to',
+          value: pending.snappedFacilityName + ' (' + amenityLabel(pending.snappedFacilityAmenity) + ', ' +
+            Math.round(pending.snapDistanceM) + 'm from your click)',
+          tone: 'good',
+        });
+      } else {
+        lines.push({ label: 'Site', value: 'open point — no mosque or public building within ' + rules.WARNING_SNAP_MAX_M + 'm' });
+      }
+      const radius = Number(forms.coverageRadiusM);
+      if (!radius || radius <= 0) {
+        lines.push({ label: 'Coverage', value: 'enter a radius above 0 to see what it reaches', tone: 'warn' });
+      } else {
+        const cov = computeWarningCoverage(pending.lat, pending.lng, radius, geoData);
+        lines.push({ label: 'Buildings covered', value: String(cov.buildingCount) });
+        lines.push({ label: 'People (rough estimate)', value: '≈ ' + cov.estimatedPeople + ' at 6.5 per building' });
+      }
       return lines;
     },
   },
   {
-    key: 'medicalPost',
+    key: 'rainEvacZone',
+    label: 'Priority evacuation zone',
+    emoji: '⚠️',
+    color: '#7c3aed',
+    kind: 'area',
+    implemented: true,
+    targetType: 'rainEvacZone',
+    hint: 'Valid at Heavy (30.1mm+/24hr) and above, and must overlap a mapped drainage-risk zone (orange/red on the map) — rainfall pools at specific low points, not the whole sector.',
+    effectLabel: 'Marks a drainage-risk pocket for first-priority evacuation',
+    formFields: [
+      { key: 'radiusM', label: 'Zone radius', type: 'number', min: 50, max: 2000, step: 25, unit: 'm', default: 300 },
+    ],
+    submitLabel: 'Add evacuation zone',
+    computeSummary: function (pending, forms, geoData) {
+      const radius = Number(forms.radiusM);
+      const lines = [{ label: 'Forecast band', value: rainfallBandLabel(geoData.scenario), tone: 'good' }];
+      if (!radius || radius <= 0) {
+        lines.push({ label: 'Zone', value: 'Enter a radius above 0 to see what is inside', tone: 'warn' });
+        return lines;
+      }
+      const stats = computeRainfallZoneStats(pending.lat, pending.lng, radius, geoData);
+      if (stats.critical) {
+        lines.push({
+          label: 'PRIORITY',
+          value: 'CRITICAL — ' + stats.hospitals.length + ' hospital' + (stats.hospitals.length > 1 ? 's' : '') + ' inside: ' + stats.hospitals.join(', '),
+          tone: 'critical',
+        });
+      }
+      lines.push({
+        label: 'Drainage risk',
+        value: stats.maxRiskClass ? stats.maxRiskClass.toUpperCase() + ' zone inside' : 'no risk zone overlap',
+        tone: stats.maxRiskClass ? 'bad' : 'warn',
+      });
+      lines.push({ label: 'Low points inside', value: String(stats.lowPointCount) });
+      lines.push({ label: 'Buildings inside', value: String(stats.buildingCount) });
+      return lines;
+    },
+  },
+  {
+    key: 'rainRoadClosure',
+    label: 'Road closure & diversion',
+    emoji: '🚧',
+    color: '#dc2626',
+    kind: 'road',
+    implemented: true,
+    targetType: 'rainRoadClosure',
+    hint: 'Click a road at a flagged underpass or low point (blue dots) — valid at Heavy (30.1mm+/24hr) and above. Closes the road and marks the diversion in one action.',
+    effectLabel: 'Closes the road at this low point and marks it as a diversion point',
+    formFields: [
+      { key: 'durationHr', label: 'Expected duration', type: 'number', optional: true, min: 1, max: 168, step: 1, unit: 'hr', default: '' },
+    ],
+    submitLabel: 'Close & mark diversion',
+    computeSummary: function (pending, forms, geoData) {
+      const lines = [
+        { label: 'Forecast band', value: rainfallBandLabel(geoData.scenario), tone: 'good' },
+        { label: 'Road', value: pending.roadName || amenityLabel(pending.roadHighwayType) },
+        { label: 'Flagged as', value: (pending.lowPointKind === 'underpass' ? 'Underpass' : 'Road sag') + ', drop ' + pending.dropM + 'm', tone: 'bad' },
+      ];
+      lines.push(pending.hasAlternate
+        ? { label: 'Alternate route', value: 'a different road exists nearby to divert onto', tone: 'good' }
+        : { label: 'Alternate route', value: 'no other road found nearby — traffic would have nowhere to go', tone: 'critical' });
+      return lines;
+    },
+  },
+  {
+    key: 'rainWaterRescue',
+    label: 'Water rescue staging point',
+    emoji: '🛟',
+    color: '#0ea5e9',
+    kind: 'point',
+    implemented: true,
+    targetType: 'rainWaterRescue',
+    hint: 'Valid ONLY at Very heavy (70.1mm+/24hr) and above, and adjacent to a High/Severe drainage-risk zone. Covers boat AND rope/wading/swift-water teams — urban flash-flood water is usually too shallow and fast for boats alone.',
+    effectLabel: 'Staging point for water rescue teams (boat, rope, swift-water)',
+    formFields: [
+      { key: 'teamsAvailable', label: 'Teams available', type: 'number', optional: true, min: 1, max: 20, step: 1, unit: '', default: '' },
+    ],
+    submitLabel: 'Add staging point',
+    computeSummary: function (pending, forms, geoData) {
+      return [
+        { label: 'Forecast band', value: rainfallBandLabel(geoData.scenario), tone: 'good' },
+        { label: 'Adjacent zone', value: pending.zoneClass.toUpperCase() + ' risk, pools up to ' + pending.zoneMaxSinkM + 'm', tone: 'bad' },
+      ];
+    },
+  },
+  {
+    key: 'rainMedicalPost',
     label: 'Medical / first-aid post',
     emoji: '🚑',
     color: '#e11d48',
     kind: 'point',
-    phase: 2,
     implemented: true,
-    targetType: 'medicalPost',
-    safetyNoun: 'medical post',
-    hint: 'Click ground clear of the flood. The popup shows how far the nearest real hospital is, so you can see whether this post fills a gap.',
+    targetType: 'rainMedicalPost',
+    hint: 'Requires an evacuation zone already placed nearby. Must sit outside every drainage-risk zone, on an open (not closed) road.',
     effectLabel: 'Field medical post for casualties and first aid',
     formFields: [
       { key: 'postType', label: 'Post type', type: 'select', options: [
@@ -183,233 +426,307 @@ const RESPONSE_TOOLS = [
     ],
     submitLabel: 'Add medical post',
     computeSummary: function (pending, forms, geoData) {
-      const rules = getResponseRules(geoData.scenario);
-      const lines = [floodClearanceLine(pending.nearestFloodM, rules)];
-
+      const lines = [
+        { label: 'Nearest evac zone', value: Math.round(pending.nearestZoneM) + 'm away', tone: 'good' },
+        { label: 'Road access', value: (pending.roadName || amenityLabel(pending.roadHighwayType)) + ', ' + Math.round(pending.roadDistanceM) + 'm', tone: 'good' },
+      ];
       if (pending.nearestHospitalM === null || pending.nearestHospitalM === undefined) {
         lines.push({ label: 'Nearest hospital', value: 'none found in the facilities layer', tone: 'warn' });
       } else {
-        const km = pending.nearestHospitalM >= 1000;
-        const dist = km
-          ? (pending.nearestHospitalM / 1000).toFixed(1) + 'km'
-          : Math.round(pending.nearestHospitalM) + 'm';
-        lines.push({
-          label: 'Nearest hospital',
-          value: pending.nearestHospitalName + ', ' + dist + ' away',
-          // Close by is not wrong, but it is worth seeing before committing
-          // a post that may duplicate a hospital still in service.
-          tone: pending.nearestHospitalM < 300 ? 'warn' : 'good',
-        });
+        const dist = pending.nearestHospitalM >= 1000 ? (pending.nearestHospitalM / 1000).toFixed(1) + 'km' : Math.round(pending.nearestHospitalM) + 'm';
+        lines.push({ label: 'Nearest hospital', value: pending.nearestHospitalName + ', ' + dist + ' away', tone: pending.nearestHospitalM < 300 ? 'warn' : 'good' });
       }
       return lines;
     },
   },
   {
-    key: 'supplyPoint',
-    label: 'Food & water distribution',
-    emoji: '🍲',
-    color: '#ca8a04',
+    key: 'rainReliefCamp',
+    label: 'Relief camp / shelter',
+    emoji: '🏕️',
+    color: '#16a34a',
     kind: 'point',
-    phase: 2,
     implemented: true,
-    targetType: 'supplyPoint',
-    safetyNoun: 'distribution point',
-    hint: 'Click ground clear of the flood. The popup reports whether a supply truck can actually reach the point.',
-    effectLabel: 'Distribution point for food and drinking water',
+    targetType: 'rainReliefCamp',
+    hint: 'Same placement rule as the medical post — requires a nearby evacuation zone, outside every drainage-risk zone, on an open road. Snaps to a real school/community building if one is close by.',
+    effectLabel: 'Shelter site for displaced families — can absorb food/water provisioning as a capacity attribute',
     formFields: [
-      { key: 'supplyCapacity', label: 'Supply capacity', type: 'number', optional: true, min: 1, max: 100000, step: 50, unit: 'people/day', default: '' },
+      { key: 'capacity', label: 'Capacity', type: 'number', min: 1, max: 20000, step: 10, unit: 'people', default: 200 },
     ],
-    submitLabel: 'Add distribution point',
-    computeSummary: function (pending, forms, geoData) {
-      const rules = getResponseRules(geoData.scenario);
-      const lines = [floodClearanceLine(pending.nearestFloodM, rules)];
-
-      if (pending.roadDistanceM === null || pending.roadDistanceM === undefined) {
-        lines.push({ label: 'Road access', value: 'road data not loaded — unverified', tone: 'warn' });
-      } else if (pending.roadReachable) {
-        lines.push({
-          label: 'Road access',
-          value: (pending.roadName || amenityLabel(pending.roadHighwayType)) + ', ' + Math.round(pending.roadDistanceM) + 'm',
-          tone: 'good',
-        });
-      } else {
-        lines.push({
-          label: 'Road access',
-          value: 'nearest road is ' + Math.round(pending.roadDistanceM) + 'm away — supplies would need carrying the last stretch',
-          tone: 'warn',
-        });
-      }
-      return lines;
-    },
-  },
-
-  // ---- Phase 3: specialised terrain actions ----
-  {
-    key: 'dewatering',
-    label: 'Dewatering pump',
-    emoji: '💧',
-    color: '#0891b2',
-    kind: 'point',
-    phase: 3,
-    implemented: true,
-    targetType: 'dewatering',
-    hint: 'Click standing water — the pump snaps to the deepest point within 60m, so it lands where water actually pools rather than on the shallow rim.',
-    effectLabel: 'Pump site for draining standing water',
-    formFields: [
-      { key: 'capacityLps', label: 'Pump capacity', type: 'number', min: 1, max: 5000, step: 5, unit: 'L/s', default: 50 },
-    ],
-    submitLabel: 'Add pump',
-    computeSummary: function (pending, forms, geoData) {
-      const lines = [];
-      if (pending.movedToDeepestM > 5) {
-        lines.push({
-          label: 'Moved to deepest',
-          value: Math.round(pending.movedToDeepestM) + 'm from your click, ' +
-            formatDepth(pending.clickDepthM) + ' → ' + formatDepth(pending.depthM),
-          tone: 'good',
-        });
-      } else {
-        lines.push({
-          label: 'Position',
-          value: 'already the deepest point within ' + pending.searchRadiusM + 'm',
-          tone: 'good',
-        });
-      }
-      lines.push({ label: 'Water depth here', value: formatDepth(pending.depthM), tone: 'bad' });
-      return lines;
-    },
-  },
-  {
-    key: 'helipad',
-    label: 'Helicopter landing zone',
-    emoji: '🚁',
-    color: '#475569',
-    kind: 'point',
-    phase: 3,
-    implemented: true,
-    targetType: 'helipad',
-    hint: 'Click dry open ground (parks, fields). Rejects buildings, anything in the flood extent, and any space too small to hold a 40m clear radius.',
-    effectLabel: 'Touchdown site for helicopter operations',
-    formFields: [],
-    submitLabel: 'Add landing zone',
-    computeSummary: function (pending, forms, geoData) {
-      const rules = getResponseRules(geoData.scenario);
-      return [
-        { label: 'Open ground', value: pending.spaceName, tone: 'good' },
-        { label: 'Clear radius', value: pending.clearRadiusM + 'm confirmed clear of buildings', tone: 'good' },
-        {
-          label: 'Flood clearance',
-          value: isFinite(pending.nearestFloodM)
-            ? Math.round(pending.nearestFloodM) + 'm from the nearest floodwater'
-            : 'no floodwater within the clear radius',
-          tone: 'good',
-        },
-        { label: 'Sized for', value: 'medium lift (Mi-17 class, ~21m rotor)' },
-      ];
-    },
-  },
-  {
-    key: 'diversion',
-    label: 'Traffic diversion point',
-    emoji: '↩️',
-    color: '#8b5cf6',
-    kind: 'point',
-    phase: 3,
-    implemented: true,
-    targetType: 'diversion',
-    hint: 'Click where traffic should be turned around. Requires a road closure already in this plan within 250m — close the flooded road first.',
-    effectLabel: 'Point where traffic is turned away from a closure',
-    formFields: [],
-    submitLabel: 'Add diversion point',
+    submitLabel: 'Add shelter',
     computeSummary: function (pending, forms, geoData) {
       const lines = [
-        {
-          label: 'Diverting from',
-          value: pending.divertingFrom + ', ' + Math.round(pending.closureDistanceM) + 'm away',
-          tone: 'good',
-        },
+        { label: 'Nearest evac zone', value: Math.round(pending.nearestZoneM) + 'm away', tone: 'good' },
       ];
-      lines.push(pending.onRoad
-        ? { label: 'On road', value: pending.roadName || amenityLabel(pending.roadHighwayType) }
-        : { label: 'On road', value: 'no road within ' + getResponseRules(geoData.scenario).ROAD_SNAP_MAX_M + 'm of the click', tone: 'warn' });
-      if (pending.selfFlooded) {
-        lines.push({
-          label: 'Warning',
-          value: 'this point is itself under ' + formatDepth(pending.selfFloodDepthM) + ' of water',
-          tone: 'warn',
-        });
-      }
-
-      // Verdict from the directed road network — see the /diversion-check
-      // effect. Reported, never blocking: OSM oneway data is not perfect
-      // and the planner may know the junction better than the map does.
-      const dc = geoData.diversionCheck;
-      if (!dc) {
-        // nothing to add yet
-      } else if (dc.loading) {
-        lines.push({ label: 'Road-network check', value: 'checking which side of the closure this is on…' });
-      } else if (dc.error) {
-        lines.push({ label: 'Road-network check', value: 'could not run (' + dc.error + ') — position not verified', tone: 'warn' });
-      } else if (!dc.checked) {
-        lines.push({ label: 'Road-network check', value: dc.reason || 'not verifiable for this closure', tone: 'warn' });
-      } else {
-        lines.push(dc.upstream
-          ? { label: 'Position', value: 'upstream — traffic here still reaches the closure', tone: 'good' }
-          : { label: 'Position', value: 'NOT upstream — traffic passing here never meets that closure, so turning them here achieves nothing', tone: 'critical' });
-        lines.push(dc.alternative_exists
-          ? { label: 'Way round', value: 'a route past the closure exists from this point', tone: 'good' }
-          : { label: 'Way round', value: 'no route past the closure from here — drivers would need turning back further upstream', tone: 'critical' });
-      }
-      return lines;
-    },
-  },
-  {
-    key: 'warningPoint',
-    label: 'Warning announcement point',
-    emoji: '📢',
-    color: '#f59e0b',
-    kind: 'area',
-    phase: 3,
-    implemented: true,
-    targetType: 'warningPoint',
-    hint: 'Click a mosque or public point for loudspeaker warnings — snaps onto a real one if it is within 80m. Set the coverage radius to see what it reaches.',
-    effectLabel: 'Loudspeaker / siren coverage for residents',
-    formFields: [
-      { key: 'coverageRadiusM', label: 'Coverage radius', type: 'number', min: 50, max: 3000, step: 25, unit: 'm', default: 400 },
-    ],
-    submitLabel: 'Add warning point',
-    computeSummary: function (pending, forms, geoData) {
-      const rules = getResponseRules(geoData.scenario);
-      const lines = [];
-
       if (pending.snappedFacilityName) {
         lines.push({
           label: 'Snapped to',
-          value: pending.snappedFacilityName + ' (' + amenityLabel(pending.snappedFacilityAmenity) + ', ' +
-            Math.round(pending.snapDistanceM) + 'm from your click)',
+          value: pending.snappedFacilityName + ' (' + amenityLabel(pending.snappedFacilityAmenity) + ', ' + Math.round(pending.snapDistanceM) + 'm from your click)',
           tone: 'good',
         });
       } else {
-        lines.push({ label: 'Site', value: 'open point — no mosque or public building within ' + rules.WARNING_SNAP_MAX_M + 'm' });
+        lines.push({ label: 'Site', value: 'open ground, on a mapped road' });
       }
+      lines.push({ label: 'Road access', value: (pending.roadName || amenityLabel(pending.roadHighwayType)) + ', ' + Math.round(pending.roadDistanceM) + 'm', tone: 'good' });
+      return lines;
+    },
+  },
+];
 
-      const radius = Number(forms.coverageRadiusM);
-      if (!radius || radius <= 0) {
-        lines.push({ label: 'Coverage', value: 'enter a radius above 0 to see what it reaches', tone: 'warn' });
-      } else {
-        const cov = computeWarningCoverage(pending.lat, pending.lng, radius, geoData);
-        lines.push({ label: 'Buildings covered', value: String(cov.buildingCount) });
-        lines.push({ label: 'People (rough estimate)', value: '≈ ' + cov.estimatedPeople + ' at 6.5 per building' });
+
+// ---------------------------------------------------------------------
+// DRAINAGE FAILURE response actions.
+//
+// A separate list, not a filtered view of RESPONSE_TOOLS or
+// RAINFALL_RESPONSE_TOOLS — drainage failure is about the STORM DRAIN
+// NETWORK being overwhelmed (culverts, manholes, pump capacity), not a
+// river polygon or dispersed urban ponding. Because it genuinely IS about
+// water backing up through the channel/drain network, it reuses the
+// live flood-depth grid (the same physics infrastructure river_overflow
+// uses) — but every threshold and rule below is new and specific to
+// drain-network concepts. See the resolveDrainXxx functions.
+// ---------------------------------------------------------------------
+const DRAINAGE_FAILURE_RESPONSE_TOOLS = [
+  {
+    key: 'drainBlockageClearance',
+    label: 'Blockage / debris clearance point',
+    emoji: '🧹',
+    color: '#b45309',
+    kind: 'point',
+    implemented: true,
+    targetType: 'drainBlockageClearance',
+    hint: 'Click where a road runs close to the nullah (a culvert). Valid only on a HIGH-capacity culvert (trunk/primary/secondary) that is backing up anyway — that mismatch is what points to a blockage, not just water being present.',
+    effectLabel: 'Dispatches a crew to clear debris/silt from this culvert',
+    formFields: [],
+    submitLabel: 'Dispatch clearance crew',
+    computeSummary: function (pending, forms, geoData) {
+      return [
+        { label: 'Culvert road', value: pending.roadName || amenityLabel(pending.roadHighwayType), tone: 'good' },
+        { label: 'Capacity rating', value: pending.highwayClass.toUpperCase() + ' — should carry more than this', tone: 'good' },
+        { label: 'Water backing up', value: formatDepth(pending.depthM) + ' — flow mismatch', tone: 'bad' },
+      ];
+    },
+  },
+  {
+    key: 'drainPumpDeployment',
+    label: 'Emergency drainage crew / pump deployment',
+    emoji: '🚜',
+    color: '#0891b2',
+    kind: 'point',
+    implemented: true,
+    targetType: 'drainPumpDeployment',
+    hint: 'Click a known chronic low point (blue dots) — pre-positions mobile pump/crew equipment there before water peaks, not after.',
+    effectLabel: 'Pre-positions mobile pump/crew equipment at this low point',
+    formFields: [
+      { key: 'pumpsAvailable', label: 'Pumps available', type: 'number', optional: true, min: 1, max: 50, step: 1, unit: '', default: '' },
+    ],
+    submitLabel: 'Deploy to this point',
+    computeSummary: function (pending, forms) {
+      const lines = [
+        { label: 'Low point type', value: pending.lowPointKind === 'underpass' ? 'Underpass' : 'Road sag', tone: 'good' },
+        { label: 'Historic drop', value: pending.dropM + 'm below both approaches' },
+      ];
+      if (pending.currentDepthM > 0) lines.push({ label: 'Currently flooded', value: formatDepth(pending.currentDepthM), tone: 'bad' });
+      return lines;
+    },
+  },
+  {
+    key: 'drainSewerOverflow',
+    label: 'Sewer / manhole overflow marker',
+    emoji: '☣️',
+    color: '#7c2d12',
+    kind: 'point',
+    implemented: true,
+    targetType: 'drainSewerOverflow',
+    hint: 'Click a road junction (3+ connecting roads) where water is actually surfacing — flags a contamination risk, distinct from an ordinary flood hazard.',
+    effectLabel: 'Contamination-warning marker for public health / sanitation crews',
+    formFields: [],
+    submitLabel: 'Add overflow marker',
+    computeSummary: function (pending) {
+      return [
+        { label: '☣️ CONTAMINATION RISK', value: 'sewer/manhole overflow — not a normal flood hazard', tone: 'critical' },
+        { label: 'Junction', value: pending.junctionDegree + '-way road junction' },
+        { label: 'Water surfacing', value: formatDepth(pending.depthM), tone: 'bad' },
+      ];
+    },
+  },
+  {
+    key: 'drainVectorControl',
+    label: 'Standing water / vector-control point',
+    emoji: '🦟',
+    color: '#4d7c0f',
+    kind: 'point',
+    implemented: true,
+    targetType: 'drainVectorControl',
+    hint: 'Click standing water. Requires an observed/expected standing duration of 72h+ (3 days — the standard window before mosquito larvae reach adulthood) before it is worth a larvicide/spraying crew.',
+    effectLabel: 'Flags standing water for larvicide/spraying crews — NOT a rescue action',
+    formFields: [
+      { key: 'durationHr', label: 'Standing duration (observed or expected)', type: 'number', min: 72, max: 720, step: 1, unit: 'hr', default: 96 },
+    ],
+    submitLabel: 'Flag for vector control',
+    computeSummary: function (pending, forms) {
+      const lines = [{ label: 'Standing water here', value: formatDepth(pending.depthM), tone: 'bad' }];
+      const hrs = Number(forms.durationHr);
+      if (hrs) lines.push({ label: 'Standing duration', value: hrs + 'h (' + (hrs / 24).toFixed(1) + ' days)', tone: hrs >= 72 ? 'good' : 'warn' });
+      lines.push({ label: 'Crew type', value: 'Larvicide / spraying — not water rescue' });
+      return lines;
+    },
+  },
+  {
+    key: 'drainBypass',
+    label: 'Temporary diversion / bypass point',
+    emoji: '↪️',
+    color: '#6d28d9',
+    kind: 'point',
+    implemented: true,
+    targetType: 'drainBypass',
+    hint: 'Click a currently flooded low point — finds the nearest functioning (less backed-up) nullah segment and marks a temporary bypass flow path to it for a works crew.',
+    effectLabel: 'Marks a temporary flow path from this low point to a functioning drain segment',
+    formFields: [],
+    submitLabel: 'Mark bypass path',
+    computeSummary: function (pending) {
+      return [
+        { label: 'Origin', value: formatDepth(pending.originDepthM) + ' standing at this low point', tone: 'bad' },
+        { label: 'Bypass target', value: Math.round(pending.distanceM) + 'm away, ' + formatDepth(pending.destDepthM) + ' there', tone: 'good' },
+      ];
+    },
+  },
+];
+
+// ---------------------------------------------------------------------
+// DAM RELEASE response actions.
+//
+// Grounded in real, documented practice: Rawal Dam releases directly
+// into Korang Nullah, which runs through this exact corridor. Unlike
+// rainfall or a river naturally overflowing, a dam release has a named
+// authority actively controlling the water and a KNOWN lead time (real
+// advisories sound sirens ~30 minutes before spillway gates open) — so
+// this scenario gets a countdown, not a generic alert, and every action
+// below is built around that arrival-time math.
+//
+// A separate list, not a filtered view of any other RESPONSE_TOOLS
+// array — see the resolveDamXxx functions below for the (entirely new)
+// validation.
+// ---------------------------------------------------------------------
+const DAM_RELEASE_RESPONSE_TOOLS = [
+  {
+    key: 'damReleaseTracking',
+    label: 'Release-rate tracking point',
+    emoji: '📊',
+    color: '#581c87',
+    kind: 'point',
+    implemented: true,
+    targetType: 'damReleaseTracking',
+    hint: 'Click anywhere in the modeled area to log the CURRENT discharge rate from the dam — this is a status reading, not a rescue pin. It drives the countdown math for the warning point, evacuation zone and rally point below.',
+    effectLabel: 'Logs the current dam discharge rate for the whole plan',
+    formFields: [
+      { key: 'dischargeCusecs', label: 'Current discharge rate', type: 'number', min: 1, max: 50000, step: 1, unit: 'cusecs', default: 6283 },
+    ],
+    submitLabel: 'Log discharge rate',
+    computeSummary: function (pending, forms) {
+      const rules = getResponseRules({ cause_type: 'dam_release' });
+      const cusecs = Number(forms.dischargeCusecs) || rules.REFERENCE_DISCHARGE_CUSECS;
+      const lines = [
+        { label: 'Discharge rate', value: cusecs.toLocaleString() + ' cusecs', tone: 'good' },
+      ];
+      if (cusecs === rules.REFERENCE_DISCHARGE_CUSECS) {
+        lines.push({ label: 'Reference', value: 'matches the documented 2-ft reservoir drawdown release' });
       }
-
-      if (pending.selfFlooded) {
-        lines.push({
-          label: 'Warning',
-          value: 'this point is itself under ' + formatDepth(pending.selfFloodDepthM) + ' of water',
-          tone: 'warn',
-        });
+      lines.push({ label: 'Effect', value: 'the warning countdown, evacuation tiers and rally-point checks below all use whichever tracking point was logged most recently' });
+      return lines;
+    },
+  },
+  {
+    key: 'damWarningPoint',
+    label: 'Dam-release warning point',
+    emoji: '⏱️',
+    color: '#dc2626',
+    kind: 'area',
+    implemented: true,
+    targetType: 'damWarningPoint',
+    hint: 'Click anywhere reachable — computes a real countdown to when the release wave reaches this point, from the dam\'s known distance and the current discharge rate. Snaps to a real mosque/school within 80m for broadcast.',
+    effectLabel: 'A literal countdown to wave arrival, not a generic alert',
+    formFields: [],
+    submitLabel: 'Add warning point',
+    computeSummary: function (pending) {
+      const lines = [
+        { label: 'Distance from Rawal Dam', value: pending.distanceFromDamKm.toFixed(1) + 'km (straight-line estimate)' },
+        { label: 'Estimated arrival', value: formatCountdown(pending.arrivalMinutes), tone: pending.arrivalMinutes < 30 ? 'critical' : 'bad' },
+        { label: 'Discharge used', value: pending.dischargeCusecs.toLocaleString() + ' cusecs' },
+      ];
+      if (pending.snappedFacilityName) {
+        lines.push({ label: 'Snapped to', value: pending.snappedFacilityName + ' (' + amenityLabel(pending.snappedFacilityAmenity) + ')', tone: 'good' });
       }
       return lines;
+    },
+  },
+  {
+    key: 'damEvacZone',
+    label: 'Time-tiered evacuation zone',
+    emoji: '🌊',
+    color: '#7c3aed',
+    kind: 'area',
+    implemented: true,
+    targetType: 'damEvacZone',
+    hint: 'Click along Korang Nullah — the zone is automatically labelled 🔴 Immediate (under 30min), 🟠 Soon (30min-2hr) or 🔵 Later (2hr+), based on how long the release wave actually takes to reach it — not a single flat radius regardless of distance from the dam.',
+    effectLabel: 'Evacuation urgency banded by real wave-arrival time',
+    formFields: [
+      { key: 'radiusM', label: 'Zone radius', type: 'number', min: 50, max: 2000, step: 25, unit: 'm', default: 300 },
+    ],
+    submitLabel: 'Add evacuation zone',
+    computeSummary: function (pending, forms, geoData) {
+      const lines = [
+        { label: 'Distance from Rawal Dam', value: pending.distanceFromDamKm.toFixed(1) + 'km' },
+        { label: 'Urgency', value: tierLabel(pending.tier) + ' · ' + formatCountdown(pending.arrivalMinutes) + ' until the water arrives', tone: tierTone(pending.tier) },
+      ];
+      const radius = Number(forms.radiusM);
+      if (radius > 0) {
+        const stats = computeDamZoneStats(pending.lat, pending.lng, radius, geoData);
+        if (stats.critical) {
+          lines.push({ label: 'PRIORITY', value: 'CRITICAL — hospital inside: ' + stats.hospitals.join(', '), tone: 'critical' });
+        }
+        lines.push({ label: 'Buildings inside', value: String(stats.buildingCount) });
+      }
+      return lines;
+    },
+  },
+  {
+    key: 'damCrossingClosure',
+    label: 'Bridge / crossing closure point',
+    emoji: '🌉',
+    color: '#b45309',
+    kind: 'point',
+    implemented: true,
+    targetType: 'damCrossingClosure',
+    hint: 'Click a footbridge or informal crossing over the nullah. Valid only while an active release is under way — the danger here is sudden current/velocity, not standing depth, so this does not use the generic road-closure depth check.',
+    effectLabel: 'Closes a crossing made dangerous by sudden current, not depth',
+    formFields: [],
+    submitLabel: 'Close this crossing',
+    computeSummary: function (pending) {
+      return [
+        { label: '⚠️ Hazard', value: 'sudden current / velocity change — not water depth', tone: 'critical' },
+        { label: 'Distance from Rawal Dam', value: pending.distanceFromDamKm.toFixed(1) + 'km' },
+        { label: 'Estimated arrival here', value: formatCountdown(pending.arrivalMinutes), tone: 'bad' },
+      ];
+    },
+  },
+  {
+    key: 'damRallyPoint',
+    label: 'High-ground rally point',
+    emoji: '🏔️',
+    color: '#166534',
+    kind: 'point',
+    implemented: true,
+    targetType: 'damRallyPoint',
+    hint: 'Click high/dry ground near the nullah. Valid only if it is actually reachable ON FOOT before the release wave gets there — not just "high" in the abstract.',
+    effectLabel: 'Close, fast refuge — reachable before the surge, not a distant shelter',
+    formFields: [],
+    submitLabel: 'Add rally point',
+    computeSummary: function (pending) {
+      return [
+        { label: 'Walk from the nullah', value: Math.round(pending.walkMinutes) + ' min', tone: 'good' },
+        { label: 'Wave arrival there', value: formatCountdown(pending.arrivalMinutes), tone: 'bad' },
+        { label: 'Safety margin', value: Math.round(pending.arrivalMinutes - pending.walkMinutes) + ' min to spare', tone: 'good' },
+      ];
     },
   },
 ];
@@ -930,10 +1247,13 @@ function validateEmbankmentLine(lineCoords, waterwaysGeoJSON, buildingsGeoJSON, 
 // adding a key here — no other code below is scenario-specific.
 const RESPONSE_RULES = {
   river_overflow: {
-    // A road under roughly 20cm of standing water is still driveable.
-    // Below this depth there is nothing to close, and closing it diverts
-    // traffic for no reason. Named so the number is reviewable.
-    IMPASSABLE_ROAD_DEPTH_M: 0.2,
+    // The DEM quantises elevation at 1m (289 distinct values across 298m
+    // of relief), so any threshold below a whole metre is unenforceable —
+    // it silently collapses onto the nearest metre and can never fire.
+    // 20cm ("still driveable") could never trigger; 1m is the shallowest
+    // depth this data can actually distinguish and is also genuinely
+    // impassable for a normal vehicle. Named so the number is reviewable.
+    IMPASSABLE_ROAD_DEPTH_M: 1,
     // How close a click must land to a road to count as "on" that road.
     ROAD_SNAP_MAX_M: 20,
     // A boat launch may sit just beside the water, not only in it.
@@ -946,6 +1266,9 @@ const RESPONSE_RULES = {
     // A camp placed this close to a real school / community building
     // snaps onto it instead of sitting on bare ground beside it.
     SHELTER_SNAP_MAX_M: 80,
+    // How far the merged relief/medical point can be from an existing
+    // evacuation zone and still count as serving it.
+    EVAC_ZONE_EXISTS_MAX_M: 2000,
     // Beyond this a supply truck cannot reach the distribution point.
     // Surfaced as a warning, not a rejection — see resolveSupplyPoint.
     SUPPLY_ROAD_ACCESS_MAX_M: 100,
@@ -967,6 +1290,135 @@ const RESPONSE_RULES = {
     CLOSURE_ON_ROUTE_M: 25,
     // Two actions of the same type closer than this are treated as
     // overlapping and are drawn so they stay tellable apart.
+    SAME_TYPE_OVERLAP_M: 30,
+  },
+
+  // -----------------------------------------------------------------
+  // RAINFALL (pluvial). Independent thresholds from river_overflow —
+  // severity here is a PMD/FFD 24-hour band, not a modeled water level,
+  // and placement is checked against the terrain-derived drainage-risk
+  // layer (Backend/scripts/build_drainage_risk.py), not a flood-extent
+  // polygon around the nullah.
+  // -----------------------------------------------------------------
+  rainfall: {
+    // Minimum PMD band each action needs. A warning is cheap and goes
+    // out early; evacuation and road closure wait for real drainage
+    // exceedance; rescue staging waits for water deep enough to need it.
+    WARNING_MIN_BAND: 'moderate',
+    EVAC_MIN_BAND: 'heavy',
+    ROAD_MIN_BAND: 'heavy',
+    RESCUE_MIN_BAND: 'very_heavy',
+    ROAD_SNAP_MAX_M: 20,
+    // How close a click has to be to a mapped underpass/sag to count as
+    // "at" that low point.
+    LOW_POINT_SNAP_MAX_M: 30,
+    // Simplified alternate-route check for the merged road-closure action
+    // (see resolveRainRoadClosure) — how far out to look for a different
+    // road to divert onto.
+    ALT_ROUTE_SEARCH_M: 150,
+    // A rescue staging point may sit just beside the risk zone, not only
+    // inside it.
+    RESCUE_ADJACENCY_M: 60,
+    // "Deep enough to plausibly need water rescue" — matches the SINK_HIGH_M
+    // threshold (2m) used when the drainage-risk layer was built.
+    RESCUE_MIN_RISK_CLASS: 'high',
+    // How far a medical post / shelter can be from an existing evacuation
+    // zone and still be considered "nearby".
+    EVAC_ZONE_EXISTS_MAX_M: 2000,
+    WARNING_SNAP_MAX_M: 80,
+    SHELTER_SNAP_MAX_M: 80,
+    SAME_TYPE_OVERLAP_M: 30,
+  },
+
+  // -----------------------------------------------------------------
+  // DRAINAGE FAILURE. Genuinely reuses the live flood-depth grid (unlike
+  // rainfall) because this cause type IS the drain/channel network being
+  // overwhelmed — the bathtub-over-terrain model is physically
+  // appropriate here. Every threshold below is still new and specific
+  // to drain-network concepts (culverts, junctions, chronic low points).
+  // -----------------------------------------------------------------
+  drainage_failure: {
+    // How close a click has to land to a road to be considered "at" it.
+    ROAD_SNAP_MAX_M: 20,
+    // Road classes treated as higher-capacity culverts — real backup on
+    // one of these is the flow mismatch worth dispatching a crew for.
+    // Backup on a residential/tertiary culvert is unremarkable.
+    CULVERT_HIGH_CAPACITY_CLASSES: ['trunk', 'primary', 'secondary'],
+    // How close a road point must be to the mapped waterway to count as
+    // a culvert crossing. Distance-based, not an exact line intersection
+    // -- see resolveDrainBlockageClearance for why.
+    CULVERT_WATERWAY_MAX_M: 15,
+    // How far a click can be from a real chronic low point (from the
+    // same terrain-derived layer rainfall uses — the geography does not
+    // change between scenarios) to count as "at" it.
+    LOW_POINT_SNAP_MAX_M: 30,
+    // How far a click can be from a mapped road junction to count as
+    // "at" it — the proxy for manhole/junction nodes (no real sewer
+    // network data exists, so road-graph junctions stand in for it).
+    JUNCTION_SNAP_MAX_M: 25,
+    // A junction needs at least this many connecting road segments to
+    // count as a real intersection rather than a single road vertex.
+    JUNCTION_MIN_DEGREE: 3,
+    // How far out along the nullah to search for a segment that is
+    // genuinely less backed up than the origin, for a bypass path.
+    BYPASS_SEARCH_MAX_M: 500,
+    SAME_TYPE_OVERLAP_M: 30,
+  },
+
+  // -----------------------------------------------------------------
+  // DAM RELEASE. Rawal Dam releases directly into Korang Nullah, which
+  // runs through this exact corridor -- a controlled, actively-managed
+  // event with a documented lead time, unlike every other scenario here.
+  // Every threshold below is new to this scenario; nothing is reused
+  // from river_overflow/rainfall/drainage_failure.
+  // -----------------------------------------------------------------
+  dam_release: {
+    // Rawal Dam's real-world location (Islamabad, on the Korang River,
+    // upstream of this corridor). Sourced from Mapcarta's dam-structure
+    // entry (33.69335N, 73.12413E, elevation 532m — a point on the dam
+    // itself, not the lake centroid, which is what a response plan
+    // actually needs). Cross-checked against Wikipedia's Rawal Lake
+    // coordinate (33.700N, 73.117E), which is close but less precise for
+    // this purpose. Distance from it is still a STRAIGHT-LINE estimate,
+    // not a channel-following distance (no data connects the dam itself
+    // to this DEM), and is labelled as such everywhere it is shown. This
+    // is a public general-reference coordinate, not a surveyed WAPDA
+    // figure — verify against WAPDA/NDMA before relying on it operationally.
+    RAWAL_DAM_LAT: 33.69335,
+    RAWAL_DAM_LON: 73.12413,
+    // Planning-assumption flood-wave speed for a small urban nullah
+    // during a controlled release (general hydrology references put
+    // headwater-stream flood-wave celerity in roughly an 8-15km/h
+    // range). Not a Korang-Nullah-specific measurement.
+    FLOOD_WAVE_SPEED_KMH: 12,
+    // The one real, documented release figure available: WAPDA logged a
+    // 6,283 cusecs discharge to lower the reservoir by two feet. Used
+    // as the reference/default rate, and as the baseline the wave-speed
+    // scaling below is measured against.
+    REFERENCE_DISCHARGE_CUSECS: 6283,
+    // Wave speed scales mildly with discharge relative to the reference
+    // release (more water moves faster), clamped to a plausible range
+    // rather than left unbounded.
+    DISCHARGE_SPEED_MIN_FACTOR: 0.7,
+    DISCHARGE_SPEED_MAX_FACTOR: 1.5,
+    // Time tiers for the evacuation zone, matching the real siren lead
+    // time NDMA/civil-defense advisories describe (~30min) as the first
+    // tier boundary.
+    ARRIVAL_TIER_IMMEDIATE_MIN: 30,
+    ARRIVAL_TIER_SOON_MIN: 120,
+    WARNING_SNAP_MAX_M: 80,
+    // How close a click must be to the mapped waterway to count as a
+    // real footbridge / informal crossing over it.
+    CROSSING_SNAP_MAX_M: 30,
+    // A rally point must be reachable ON FOOT from the water's edge
+    // before the wave gets there -- this is the assumed evacuation pace
+    // (a brisk walk/run under stress, not a sprint) used for that check.
+    WALK_SPEED_KMH: 5,
+    // The walk must fit within this FRACTION of the remaining arrival
+    // time, not all of it -- leaves real decision/reaction time rather
+    // than racing the wave to the second.
+    RALLY_REACTION_FRACTION: 0.5,
+    RALLY_SAFE_CLEARANCE_M: 25,
     SAME_TYPE_OVERLAP_M: 30,
   },
 };
@@ -1308,20 +1760,1119 @@ function findNearbySameType(lat, lon, type, existingMarkers, thresholdM) {
   });
 }
 
+// =======================================================================
+// RAINFALL (pluvial) response validation.
+//
+// Deliberately independent of the river-overflow logic above. Rainfall
+// floods low points anywhere in the sector via urban drainage overwhelm
+// (underpasses, poor-drainage roads, low-lying blocks) — it is NOT tied
+// to the nullah, so it validates against a terrain-derived drainage-risk
+// layer instead of a flood-extent polygon, and severity is a PMD/FFD
+// 24-hour accumulation band instead of a modeled water level.
+// =======================================================================
+const RAINFALL_BAND_ORDER = { light: 1, moderate: 2, heavy: 3, very_heavy: 4, extremely_heavy: 5 };
+const RISK_CLASS_ORDER = { moderate: 1, high: 2, severe: 3 };
+
+function rainfallBandOrder(scenario) {
+  const rb = scenario && scenario.rainfall_band;
+  return (rb && RAINFALL_BAND_ORDER[rb.band]) || 0;
+}
+function rainfallBandAtLeast(scenario, minBand) {
+  return rainfallBandOrder(scenario) >= (RAINFALL_BAND_ORDER[minBand] || 0);
+}
+function rainfallBandLabel(scenario) {
+  const rb = scenario && scenario.rainfall_band;
+  return rb ? rb.label + ' (' + rb.range_label + ')' : 'an unknown band';
+}
+function rainfallBandRejection(scenario, minBand, actionLabel) {
+  return actionLabel + ' needs the forecast to reach ' + minBand.replace(/_/g, ' ') +
+    ' or above. This simulation is ' + rainfallBandLabel(scenario) + '.';
+}
+
+// Real distance from a point to a risk-zone polygon, 0 if inside it.
+function distanceToRiskZoneM(pt, feature) {
+  if (turf.booleanPointInPolygon(pt, feature)) return 0;
+  try {
+    return turf.nearestPointOnLine(turf.polygonToLine(feature), pt, { units: 'meters' }).properties.dist;
+  } catch (err) {
+    return Infinity;
+  }
+}
+
+function riskZonesNear(lat, lon, radiusM, geoData) {
+  const fc = geoData && geoData.drainageRiskGeoJSON;
+  if (!fc || !fc.features) return [];
+  const pt = turf.point([lon, lat]);
+  return fc.features.filter(function (f) { return distanceToRiskZoneM(pt, f) <= radiusM; });
+}
+
+function isPointInsideAnyRiskZone(lat, lon, geoData) {
+  const fc = geoData && geoData.drainageRiskGeoJSON;
+  if (!fc || !fc.features) return null;
+  const pt = turf.point([lon, lat]);
+  for (const f of fc.features) {
+    if (turf.booleanPointInPolygon(pt, f)) return f;
+  }
+  return null;
+}
+
+function nearestLowPoint(lat, lon, maxDistanceM, geoData) {
+  const fc = geoData && geoData.roadLowPointsGeoJSON;
+  if (!fc || !fc.features || fc.features.length === 0) {
+    return { found: false, dataMissing: !fc };
+  }
+  const pt = turf.point([lon, lat]);
+  let best = null;
+  for (const f of fc.features) {
+    const d = turf.distance(pt, turf.point(f.geometry.coordinates), { units: 'meters' });
+    if (!best || d < best.distanceM) {
+      best = { distanceM: d, props: f.properties };
+    }
+  }
+  return Object.assign({ found: best.distanceM <= maxDistanceM, dataMissing: false }, best);
+}
+
+// Buildings, low points, hospitals and drainage-risk overlap inside a
+// zone — the rainfall equivalent of computeEvacuationZoneStats(), built
+// from the risk layer instead of the live flood depth grid.
+function computeRainfallZoneStats(lat, lon, radiusM, geoData) {
+  const stats = {
+    radiusM: radiusM, buildingCount: 0, lowPointCount: 0,
+    maxRiskClass: null, hospitals: [], critical: false,
+  };
+  if (!radiusM || radiusM <= 0) return stats;
+
+  stats.buildingCount = countBuildingsWithin(lat, lon, radiusM, geoData);
+  const center = turf.point([lon, lat]);
+
+  const riskFc = geoData.drainageRiskGeoJSON;
+  if (riskFc && riskFc.features) {
+    for (const f of riskFc.features) {
+      if (distanceToRiskZoneM(center, f) > radiusM) continue;
+      const cls = f.properties.risk_class;
+      if (!stats.maxRiskClass || RISK_CLASS_ORDER[cls] > RISK_CLASS_ORDER[stats.maxRiskClass]) stats.maxRiskClass = cls;
+    }
+  }
+
+  const lowFc = geoData.roadLowPointsGeoJSON;
+  if (lowFc && lowFc.features) {
+    for (const f of lowFc.features) {
+      if (turf.distance(center, turf.point(f.geometry.coordinates), { units: 'meters' }) <= radiusM) stats.lowPointCount++;
+    }
+  }
+
+  const facilities = geoData.facilitiesGeoJSON;
+  if (facilities && facilities.features) {
+    for (const f of facilities.features) {
+      const amenity = f.properties && f.properties.amenity;
+      if (EVAC_HOSPITAL_AMENITIES.indexOf(amenity) === -1) continue;
+      const c = featureCentroidLonLat(f);
+      if (!c) continue;
+      if (turf.distance(center, turf.point(c), { units: 'meters' }) <= radiusM) {
+        stats.hospitals.push((f.properties && f.properties.name) || ('Unnamed ' + amenity));
+      }
+    }
+  }
+  stats.critical = stats.hospitals.length > 0;
+  return stats;
+}
+
+function requireOutsideRiskZones(lngLat, geoData, siteNoun) {
+  if (!geoData.drainageRiskGeoJSON) {
+    return { accepted: false, reason: 'The drainage-risk layer has not loaded — can\'t confirm this is clear of a risk zone.' };
+  }
+  const inside = isPointInsideAnyRiskZone(lngLat.lat, lngLat.lng, geoData);
+  if (inside) {
+    return {
+      accepted: false,
+      reason: 'That point is inside a ' + inside.properties.risk_class + ' drainage-risk zone — a ' + siteNoun + ' has to be on ground that stays dry.',
+    };
+  }
+  return null;
+}
+
+// A medical post / shelter exists to serve an evacuation zone, so one
+// has to already be in the plan and within reach.
+function requireNearRainfallEvacZone(lngLat, geoData, rules) {
+  const zones = (geoData.markers || []).filter(function (m) { return m.type === 'rainEvacZone'; });
+  if (zones.length === 0) {
+    return { rejection: { accepted: false, reason: 'Add a priority evacuation zone first — this action exists to serve one.' } };
+  }
+  const pt = turf.point([lngLat.lng, lngLat.lat]);
+  let nearestM = Infinity;
+  zones.forEach(function (z) {
+    const d = turf.distance(pt, turf.point([z.lon, z.lat]), { units: 'meters' });
+    if (d < nearestM) nearestM = d;
+  });
+  if (nearestM > rules.EVAC_ZONE_EXISTS_MAX_M) {
+    return {
+      rejection: {
+        accepted: false,
+        reason: 'The nearest evacuation zone is ' + Math.round(nearestM) + 'm away — too far to serve it (needs to be within ' + rules.EVAC_ZONE_EXISTS_MAX_M + 'm).',
+      },
+    };
+  }
+  return { nearestZoneM: nearestM };
+}
+
+function requireOpenRoad(lngLat, geoData, rules) {
+  const road = nearestRoad(lngLat.lat, lngLat.lng, rules.ROAD_SNAP_MAX_M, geoData);
+  if (road.dataMissing) {
+    return { rejection: { accepted: false, reason: 'Road data has not loaded.' } };
+  }
+  if (!road.found) {
+    return { rejection: { accepted: false, reason: 'No road within ' + rules.ROAD_SNAP_MAX_M + 'm — this must sit on an open road.' } };
+  }
+  const onClosedRoad = (geoData.closedRoads || []).some(function (r) {
+    if (r.lat === undefined || r.lat === null) return false;
+    return turf.distance(turf.point([road.lon, road.lat]), turf.point([r.lon, r.lat]), { units: 'meters' }) <= rules.SAME_TYPE_OVERLAP_M;
+  });
+  if (onClosedRoad) {
+    return { rejection: { accepted: false, reason: roadDescription(road) + ' is closed in this plan — needs to be on an open road.' } };
+  }
+  return { road: road };
+}
+
+// ---------------------------------------------------------------------
+// 1. Warning announcement — anywhere reachable, gated on band only.
+// ---------------------------------------------------------------------
+function resolveRainWarning(lngLat, toolDef, geoData) {
+  const scenario = geoData.scenario;
+  if (!rainfallBandAtLeast(scenario, 'moderate')) {
+    return { accepted: false, reason: rainfallBandRejection(scenario, 'moderate', 'A warning broadcast') };
+  }
+  const rules = getResponseRules(scenario);
+  const candidate = nearestFacility(lngLat.lat, lngLat.lng, WARNING_SNAP_AMENITIES, geoData, rules.WARNING_SNAP_MAX_M);
+  const snapped = candidate.found ? candidate : null;
+  const site = snapped || { lat: lngLat.lat, lon: lngLat.lng };
+  return {
+    accepted: true,
+    payload: {
+      lng: site.lon, lat: site.lat,
+      snappedFacilityName: snapped ? facilityDescription(snapped) : null,
+      snappedFacilityAmenity: snapped ? snapped.amenity : null,
+      snapDistanceM: snapped ? snapped.distanceM : null,
+    },
+  };
+}
+
+// ---------------------------------------------------------------------
+// 2. Priority evacuation zone — heavy+, must overlap a risk polygon.
+// ---------------------------------------------------------------------
+function resolveRainEvacZone(lngLat, toolDef, geoData) {
+  const scenario = geoData.scenario;
+  if (!rainfallBandAtLeast(scenario, 'heavy')) {
+    return { accepted: false, reason: rainfallBandRejection(scenario, 'heavy', 'A priority evacuation zone') };
+  }
+  if (!geoData.drainageRiskGeoJSON) {
+    return { accepted: false, reason: 'The drainage-risk layer has not loaded — can\'t confirm this overlaps a risk zone.' };
+  }
+  const inside = isPointInsideAnyRiskZone(lngLat.lat, lngLat.lng, geoData);
+  if (!inside) {
+    return {
+      accepted: false,
+      reason: 'That point does not overlap a mapped drainage-risk zone (orange/red on the map). Rainfall floods pool at specific low points, not the whole sector.',
+    };
+  }
+  return {
+    accepted: true,
+    payload: { lng: lngLat.lng, lat: lngLat.lat, zoneClass: inside.properties.risk_class, zoneMaxSinkM: inside.properties.max_sink_m },
+  };
+}
+
+// ---------------------------------------------------------------------
+// 3. Road closure & diversion — merged action. Heavy+, must sit at a
+//    flagged underpass/low point. The full directed-graph upstream check
+//    the river-overflow diversion tool runs needs a second click and a
+//    network endpoint; here the same idea is answered with a fast
+//    synchronous probe (a different road within ALT_ROUTE_SEARCH_M),
+//    which is adequate for a planning-tool demo rather than live
+//    dispatch.
+// ---------------------------------------------------------------------
+function resolveRainRoadClosure(lngLat, toolDef, geoData) {
+  const scenario = geoData.scenario;
+  const rules = getResponseRules(scenario);
+  if (!rainfallBandAtLeast(scenario, 'heavy')) {
+    return { accepted: false, reason: rainfallBandRejection(scenario, 'heavy', 'A road closure') };
+  }
+
+  const road = nearestRoad(lngLat.lat, lngLat.lng, rules.ROAD_SNAP_MAX_M, geoData);
+  if (road.dataMissing) return { accepted: false, reason: 'Road data has not loaded.' };
+  if (!road.found) {
+    return { accepted: false, reason: 'That click is ' + Math.round(road.distanceM) + 'm from the nearest road — click directly on the road.' };
+  }
+
+  const low = nearestLowPoint(road.lat, road.lon, rules.LOW_POINT_SNAP_MAX_M, geoData);
+  if (low.dataMissing) return { accepted: false, reason: 'The road low-point layer has not loaded.' };
+  if (!low.found) {
+    return {
+      accepted: false,
+      reason: roadDescription(road) + ' is not flagged as an underpass or low point in the drainage-risk layer (blue dots) — rainfall floods pool at specific points, not along every road.',
+    };
+  }
+
+  const already = (geoData.closedRoads || []).some(function (r) {
+    if (r.lat === undefined || r.lat === null) return false;
+    return turf.distance(turf.point([road.lon, road.lat]), turf.point([r.lon, r.lat]), { units: 'meters' }) <= rules.SAME_TYPE_OVERLAP_M;
+  });
+  if (already) {
+    return { accepted: false, reason: roadDescription(road) + ' is already closed in this plan at that point.' };
+  }
+
+  let hasAlternate = false;
+  for (const brng of [0, 90, 180, 270]) {
+    const probe = turf.destination(turf.point([road.lon, road.lat]), rules.ALT_ROUTE_SEARCH_M / 1000, brng, { units: 'kilometers' });
+    const r2 = nearestRoad(probe.geometry.coordinates[1], probe.geometry.coordinates[0], rules.ALT_ROUTE_SEARCH_M, geoData);
+    if (r2.found && (r2.u !== road.u || r2.v !== road.v)) { hasAlternate = true; break; }
+  }
+
+  return {
+    accepted: true,
+    payload: {
+      lng: road.lon, lat: road.lat,
+      roadName: road.name, roadHighwayType: road.highwayType, roadDistanceM: road.distanceM,
+      roadU: road.u, roadV: road.v,
+      lowPointKind: low.props.kind, dropM: low.props.drop_m, sinkDepthM: low.props.sink_depth_m,
+      hasAlternate: hasAlternate,
+    },
+  };
+}
+
+// ---------------------------------------------------------------------
+// 4. Water rescue staging point — very_heavy ONLY, adjacent to a
+//    High/Severe risk zone.
+// ---------------------------------------------------------------------
+function resolveRainWaterRescue(lngLat, toolDef, geoData) {
+  const scenario = geoData.scenario;
+  const rules = getResponseRules(scenario);
+  if (!rainfallBandAtLeast(scenario, 'very_heavy')) {
+    return { accepted: false, reason: rainfallBandRejection(scenario, 'very_heavy', 'A water rescue staging point') };
+  }
+  if (!geoData.drainageRiskGeoJSON) {
+    return { accepted: false, reason: 'The drainage-risk layer has not loaded.' };
+  }
+  const nearby = riskZonesNear(lngLat.lat, lngLat.lng, rules.RESCUE_ADJACENCY_M, geoData);
+  const deepEnough = nearby.filter(function (f) {
+    return RISK_CLASS_ORDER[f.properties.risk_class] >= RISK_CLASS_ORDER[rules.RESCUE_MIN_RISK_CLASS];
+  });
+  if (deepEnough.length === 0) {
+    return {
+      accepted: false,
+      reason: nearby.length > 0
+        ? 'The nearest risk zone here is only "' + nearby[0].properties.risk_class + '" — not deep enough to plausibly need water rescue. Needs a "' + rules.RESCUE_MIN_RISK_CLASS + '" zone within ' + rules.RESCUE_ADJACENCY_M + 'm.'
+        : 'No drainage-risk zone within ' + rules.RESCUE_ADJACENCY_M + 'm of this point.',
+    };
+  }
+  deepEnough.sort(function (a, b) { return RISK_CLASS_ORDER[b.properties.risk_class] - RISK_CLASS_ORDER[a.properties.risk_class]; });
+  const best = deepEnough[0];
+  return {
+    accepted: true,
+    payload: { lng: lngLat.lng, lat: lngLat.lat, zoneClass: best.properties.risk_class, zoneMaxSinkM: best.properties.max_sink_m, zoneId: best.properties.zone_id },
+  };
+}
+
+// ---------------------------------------------------------------------
+// 5. Medical / first-aid post — needs a nearby evac zone, outside every
+//    risk zone, on an open road.
+// ---------------------------------------------------------------------
+function resolveRainMedicalPost(lngLat, toolDef, geoData) {
+  const scenario = geoData.scenario;
+  const rules = getResponseRules(scenario);
+
+  const zoneCheck = requireNearRainfallEvacZone(lngLat, geoData, rules);
+  if (zoneCheck.rejection) return zoneCheck.rejection;
+
+  const riskRejection = requireOutsideRiskZones(lngLat, geoData, 'medical post');
+  if (riskRejection) return riskRejection;
+
+  const roadCheck = requireOpenRoad(lngLat, geoData, rules);
+  if (roadCheck.rejection) return roadCheck.rejection;
+  const road = roadCheck.road;
+
+  const hospital = nearestFacility(lngLat.lat, lngLat.lng, EVAC_HOSPITAL_AMENITIES, geoData);
+  return {
+    accepted: true,
+    payload: {
+      lng: lngLat.lng, lat: lngLat.lat,
+      nearestZoneM: zoneCheck.nearestZoneM,
+      roadName: road.name, roadHighwayType: road.highwayType, roadDistanceM: road.distanceM,
+      nearestHospitalName: hospital.distanceM !== null ? facilityDescription(hospital) : null,
+      nearestHospitalM: hospital.distanceM,
+    },
+  };
+}
+
+// ---------------------------------------------------------------------
+// 6. Relief camp / shelter — same placement rule as the medical post.
+// ---------------------------------------------------------------------
+function resolveRainReliefCamp(lngLat, toolDef, geoData) {
+  const scenario = geoData.scenario;
+  const rules = getResponseRules(scenario);
+
+  const zoneCheck = requireNearRainfallEvacZone(lngLat, geoData, rules);
+  if (zoneCheck.rejection) return zoneCheck.rejection;
+
+  const riskRejection = requireOutsideRiskZones(lngLat, geoData, 'shelter');
+  if (riskRejection) return riskRejection;
+
+  const roadCheck = requireOpenRoad(lngLat, geoData, rules);
+  if (roadCheck.rejection) return roadCheck.rejection;
+  const road = roadCheck.road;
+
+  let snapped = null;
+  const candidate = nearestFacility(lngLat.lat, lngLat.lng, SHELTER_AMENITIES, geoData, rules.SHELTER_SNAP_MAX_M);
+  if (candidate.found) {
+    const cInside = isPointInsideAnyRiskZone(candidate.lat, candidate.lon, geoData);
+    if (!cInside) snapped = candidate;
+  }
+  const site = snapped || { lat: lngLat.lat, lon: lngLat.lng };
+
+  return {
+    accepted: true,
+    payload: {
+      lng: site.lon, lat: site.lat,
+      nearestZoneM: zoneCheck.nearestZoneM,
+      roadName: road.name, roadHighwayType: road.highwayType, roadDistanceM: road.distanceM,
+      snappedFacilityName: snapped ? facilityDescription(snapped) : null,
+      snappedFacilityAmenity: snapped ? snapped.amenity : null,
+      snapDistanceM: snapped ? snapped.distanceM : null,
+    },
+  };
+}
+
 // ---------------------------------------------------------------------
 // Shared precondition for every response placement: a supported
 // scenario, and the live depth grid actually loaded and current.
 // ---------------------------------------------------------------------
+// =======================================================================
+// PLAN REPORT — plain, printable export of whatever has been placed.
+// Works for any scenario; it only reads markers/closures that already
+// exist, so a scenario with no validated actions yet simply produces an
+// empty report rather than needing special-casing here.
+// =======================================================================
+function responseToolDef(key) {
+  return RESPONSE_TOOLS.find(function (t) { return t.key === key; })
+    || RAINFALL_RESPONSE_TOOLS.find(function (t) { return t.key === key; })
+    || DRAINAGE_FAILURE_RESPONSE_TOOLS.find(function (t) { return t.key === key; })
+    || DAM_RELEASE_RESPONSE_TOOLS.find(function (t) { return t.key === key; })
+    || null;
+}
+function responseToolLabel(key) {
+  const t = responseToolDef(key);
+  return t ? t.label : key;
+}
+function responseToolEmoji(key) {
+  const t = responseToolDef(key);
+  return t ? t.emoji : '\u{1F4CC}';
+}
+
+// Turns a camelCase info key into a plain label — generic, so it covers
+// every action type without a per-type branch (roadName -> "Road name",
+// depthM -> "Depth (m)", hasAlternate -> "Has alternate").
+function humanizeInfoKey(key) {
+  var label = key.replace(/([A-Z])/g, ' $1').trim();
+  label = label.charAt(0).toUpperCase() + label.slice(1);
+  if (/ M$/.test(label)) label = label.slice(0, -2) + ' (m)';
+  return label.toLowerCase().replace(/^./, function (c) { return c.toUpperCase(); });
+}
+function formatInfoLine(key, val) {
+  if (val === null || val === undefined || val === '') return null;
+  if (Array.isArray(val)) {
+    if (val.length === 0) return null;
+    return humanizeInfoKey(key) + ': ' + val.join(', ');
+  }
+  if (typeof val === 'boolean') return humanizeInfoKey(key) + ': ' + (val ? 'Yes' : 'No');
+  if (typeof val === 'object') return null; // nested objects aren't printable facts
+  return humanizeInfoKey(key) + ': ' + val;
+}
+
+function buildMarkerDetailLines(m) {
+  const lines = [];
+  const toolDef = responseToolDef(m.type);
+  if (toolDef && m.params) {
+    const p = formatParams(toolDef, m.params);
+    if (p) lines.push(p);
+  }
+  if (m.info && typeof m.info === 'object') {
+    Object.keys(m.info).forEach(function (k) {
+      const line = formatInfoLine(k, m.info[k]);
+      if (line) lines.push(line);
+    });
+  }
+  return lines;
+}
+
+function buildClosureDetailLines(r) {
+  const lines = [];
+  if (r.roadName) lines.push('Road: ' + r.roadName);
+  else if (r.roadHighwayType) lines.push('Road type: ' + String(r.roadHighwayType).replace(/_/g, ' '));
+  if (r.depthM !== undefined && r.depthM !== null) lines.push('Water depth: ' + formatDepth(r.depthM));
+  if (r.durationHr) lines.push('Expected duration: ' + r.durationHr + 'h');
+  if (r.lowPointKind) lines.push('Low point type: ' + (r.lowPointKind === 'underpass' ? 'Underpass' : 'Road sag'));
+  if (r.dropM !== undefined && r.dropM !== null) lines.push('Drop: ' + r.dropM + 'm');
+  if (r.hasAlternate !== undefined && r.hasAlternate !== null) lines.push('Alternate route: ' + (r.hasAlternate ? 'Yes' : 'No'));
+  return lines;
+}
+
+// Flat list of every placed response action, regardless of whether it
+// is a marker or a road closure — the report does not care which
+// internal bucket it lives in.
+function buildReportItems(markers, closedRoads) {
+  const items = [];
+  markers.filter(function (m) { return m.planType === 'response'; }).forEach(function (m) {
+    items.push({
+      type: m.type,
+      label: m.label || responseToolLabel(m.type),
+      emoji: m.emoji || responseToolEmoji(m.type),
+      lat: m.lat, lon: m.lon,
+      detailLines: buildMarkerDetailLines(m),
+    });
+  });
+  (closedRoads || []).forEach(function (r) {
+    const type = r.actionType || 'closeRoad';
+    items.push({
+      type: type,
+      label: responseToolLabel(type),
+      emoji: responseToolEmoji(type),
+      lat: r.lat, lon: r.lon,
+      detailLines: buildClosureDetailLines(r),
+    });
+  });
+  return items;
+}
+
+function buildReportCounts(items) {
+  const counts = {};
+  items.forEach(function (it) {
+    if (!counts[it.type]) counts[it.type] = { label: it.label, emoji: it.emoji, count: 0 };
+    counts[it.type].count++;
+  });
+  return Object.keys(counts).map(function (k) { return counts[k]; }).sort(function (a, b) { return b.count - a.count; });
+}
+
+function reportScenarioLine(scenario) {
+  const base = scenarioLabel(scenario);
+  if (scenario && scenario.cause_type === 'rainfall') {
+    return base + ' \u2014 ' + rainfallBandLabel(scenario);
+  }
+  if (scenario && scenario.water_level_m !== undefined) {
+    return base + ' \u2014 water level ' + scenario.water_level_m + 'm';
+  }
+  return base;
+}
+
+function buildReportText(scenario, items, counts) {
+  const lines = [];
+  lines.push('MOHAFIZ \u2014 RESPONSE PLAN REPORT');
+  lines.push('Scenario: ' + reportScenarioLine(scenario));
+  lines.push('Generated: ' + new Date().toLocaleString());
+  lines.push('');
+  lines.push('SUMMARY (' + items.length + ' action' + (items.length === 1 ? '' : 's') + ' total)');
+  counts.forEach(function (c) {
+    lines.push('  ' + c.emoji + ' ' + c.label + ': ' + c.count);
+  });
+  lines.push('');
+  lines.push('ACTIONS');
+  items.forEach(function (it, i) {
+    lines.push('');
+    lines.push((i + 1) + '. ' + it.emoji + ' ' + it.label);
+    lines.push('   Location: ' + it.lat.toFixed(6) + ', ' + it.lon.toFixed(6));
+    it.detailLines.forEach(function (d) { lines.push('   ' + d); });
+  });
+  lines.push('');
+  return lines.join('\n');
+}
+
+function escapeHtml(str) {
+  return String(str)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function buildReportHtml(scenario, items, counts) {
+  var rows = items.map(function (it, i) {
+    var details = it.detailLines.map(function (d) { return '<div>' + escapeHtml(d) + '</div>'; }).join('');
+    return '<div class="action">' +
+      '<div class="action-title">' + (i + 1) + '. ' + it.emoji + ' ' + escapeHtml(it.label) + '</div>' +
+      '<div class="loc">Location: ' + it.lat.toFixed(6) + ', ' + it.lon.toFixed(6) + '</div>' +
+      '<div class="details">' + details + '</div>' +
+      '</div>';
+  }).join('');
+
+  var summary = counts.map(function (c) {
+    return '<div class="summary-row"><span>' + c.emoji + ' ' + escapeHtml(c.label) + '</span><b>' + c.count + '</b></div>';
+  }).join('');
+
+  return '<!doctype html><html><head><meta charset="utf-8"><title>Mohafiz Response Plan Report</title><style>' +
+    'body{font-family:system-ui,-apple-system,Segoe UI,sans-serif;color:#0f172a;padding:32px;max-width:720px;margin:0 auto;}' +
+    'h1{font-size:18px;margin:0 0 4px;}' +
+    '.meta{color:#475569;font-size:12.5px;margin-bottom:20px;}' +
+    'h2{font-size:13px;text-transform:uppercase;letter-spacing:.03em;color:#334155;border-bottom:1px solid #e2e8f0;padding-bottom:4px;margin-top:24px;}' +
+    '.summary-row{display:flex;justify-content:space-between;padding:3px 0;font-size:13px;}' +
+    '.action{padding:10px 0;border-bottom:1px solid #f1f5f9;}' +
+    '.action-title{font-weight:700;font-size:13.5px;}' +
+    '.loc{color:#64748b;font-size:11.5px;font-family:ui-monospace,monospace;margin-top:2px;}' +
+    '.details{margin-top:4px;font-size:12px;color:#334155;}' +
+    '.details div{margin-top:1px;}' +
+    '@media print{body{padding:12px;}}' +
+    '</style></head><body>' +
+    '<h1>Mohafiz \u2014 Response Plan Report</h1>' +
+    '<div class="meta">Scenario: ' + escapeHtml(reportScenarioLine(scenario)) + '<br/>Generated: ' + escapeHtml(new Date().toLocaleString()) + '</div>' +
+    '<h2>Summary (' + items.length + ' action' + (items.length === 1 ? '' : 's') + ' total)</h2>' +
+    summary +
+    '<h2>Actions</h2>' +
+    rows +
+    '</body></html>';
+}
+
+
+// =======================================================================
+// DRAINAGE FAILURE response validation.
+//
+// About the storm-drain network being overwhelmed (culverts, manholes,
+// pumps) — not a river polygon, not dispersed urban ponding. Genuinely
+// reuses the live flood-depth grid (isPointInFloodExtent / floodGrid),
+// because for THIS cause type the bathtub-over-terrain model IS the
+// right physics: water is backing up through the channel/drain network,
+// which is exactly what that grid measures. Every rule below is new.
+// =======================================================================
+
+// Road-graph junction nodes, standing in for manholes: no real sewer
+// network data exists, so intersections of 3+ mapped roads are the
+// defensible proxy (manholes cluster at real intersections). Computed
+// once from roadsGeoJSON's own u/v node ids and cached — the road
+// network does not change during a session.
+let _junctionCache = null;
+let _junctionCacheSource = null;
+function roadJunctions(geoData) {
+  const roads = geoData && geoData.roadsGeoJSON;
+  if (!roads || !roads.features) return [];
+  if (_junctionCacheSource === roads) return _junctionCache;
+
+  const byNode = {};
+  roads.features.forEach(function (f) {
+    const coords = f.geometry && f.geometry.coordinates;
+    const u = f.properties && f.properties.u;
+    const v = f.properties && f.properties.v;
+    if (!coords || coords.length < 2 || u === undefined || v === undefined) return;
+    if (!byNode[u]) byNode[u] = { id: u, lon: coords[0][0], lat: coords[0][1], degree: 0 };
+    if (!byNode[v]) byNode[v] = { id: v, lon: coords[coords.length - 1][0], lat: coords[coords.length - 1][1], degree: 0 };
+    byNode[u].degree++;
+    byNode[v].degree++;
+  });
+
+  _junctionCache = Object.keys(byNode).map(function (k) { return byNode[k]; });
+  _junctionCacheSource = roads;
+  return _junctionCache;
+}
+
+function nearestJunction(lat, lon, maxDistanceM, minDegree, geoData) {
+  const junctions = roadJunctions(geoData);
+  const pt = turf.point([lon, lat]);
+  let best = null;
+  for (const j of junctions) {
+    if (j.degree < minDegree) continue;
+    const d = turf.distance(pt, turf.point([j.lon, j.lat]), { units: 'meters' });
+    if (!best || d < best.distanceM) best = { distanceM: d, lat: j.lat, lon: j.lon, degree: j.degree };
+  }
+  if (!best) return { found: false };
+  return Object.assign({ found: best.distanceM <= maxDistanceM }, best);
+}
+
+// ---------------------------------------------------------------------
+// 1. Blockage / debris clearance — a real culvert (a road running close
+//    to the mapped waterway) that is backing up despite being a
+//    high-capacity road class. That mismatch (rated for more than it is
+//    carrying) is the signal, not water alone — a low-capacity culvert
+//    with the same water is expected behaviour, not a blockage.
+//
+// Deliberately DISTANCE-based (both to the road and to the waterway),
+// not an exact turf.lineIntersect crossing test: real road and waterway
+// centrelines are digitised independently and routinely pass a few
+// metres apart even at a genuine culvert, so requiring an exact
+// geometric intersection produces false negatives at real culverts and
+// is fragile at junctions where several close-together road segments
+// (e.g. a dual carriageway) can cause the nearest-road pick to land on
+// a sibling segment that never crosses the line at all. Proximity to
+// both features is what "at the culvert" actually means here, and it
+// matches how every other waterway-based check in this codebase already
+// works (e.g. the prevention actions' WATERWAY_SNAP_MAX_M).
+// ---------------------------------------------------------------------
+function resolveDrainBlockageClearance(lngLat, toolDef, geoData) {
+  const scenario = geoData.scenario;
+  const rules = getResponseRules(scenario);
+
+  const road = nearestRoad(lngLat.lat, lngLat.lng, rules.ROAD_SNAP_MAX_M, geoData);
+  if (road.dataMissing) return { accepted: false, reason: 'Road data has not loaded.' };
+  if (!road.found) {
+    return { accepted: false, reason: 'That click is ' + Math.round(road.distanceM) + 'm from the nearest road — click where a road crosses the nullah.' };
+  }
+
+  const waterways = geoData.waterwaysGeoJSON;
+  if (!waterways || !waterways.features || waterways.features.length === 0) {
+    return { accepted: false, reason: 'Waterway data has not loaded — cannot confirm this is a culvert.' };
+  }
+  const roadPt = turf.point([road.lon, road.lat]);
+  const nearWaterway = turf.nearestPointOnLine(waterways, roadPt, { units: 'meters' });
+  if (nearWaterway.properties.dist > rules.CULVERT_WATERWAY_MAX_M) {
+    return {
+      accepted: false,
+      reason: roadDescription(road) + ' is ' + Math.round(nearWaterway.properties.dist) + 'm from the mapped nullah — too far to be this culvert. Click where a road crosses/runs beside the blue waterway line.',
+    };
+  }
+
+  const flood = isPointInFloodExtent(road.lat, road.lon, scenario, geoData);
+  if (!flood.ok) return { accepted: false, reason: 'That culvert ' + flood.reason + '.' };
+  if (!flood.inFlood) {
+    return { accepted: false, reason: 'No water is piling up at this culvert — nothing to clear.' };
+  }
+
+  let highwayClass = road.highwayType;
+  const isHighCapacity = rules.CULVERT_HIGH_CAPACITY_CLASSES.indexOf(highwayClass) !== -1;
+  if (!isHighCapacity) {
+    return {
+      accepted: false,
+      reason: 'This culvert carries a ' + amenityLabel(highwayClass) + ' road (lower capacity by design) — some backup here is expected, not a capacity mismatch worth dispatching a crew for. Look for a trunk/primary/secondary culvert that is backing up instead.',
+    };
+  }
+
+  return {
+    accepted: true,
+    payload: {
+      lng: road.lon, lat: road.lat,
+      roadName: road.name, roadHighwayType: highwayClass, highwayClass: highwayClass,
+      depthM: flood.depth_m,
+    },
+  };
+}
+
+// ---------------------------------------------------------------------
+// 2. Emergency drainage crew / pump deployment — pre-positioned at a
+//    known chronic low point, BEFORE water necessarily peaks there.
+//    (No real pump-station data exists, so that half of the spec is
+//    intentionally out of scope rather than invented.)
+// ---------------------------------------------------------------------
+function resolveDrainPumpDeployment(lngLat, toolDef, geoData) {
+  const scenario = geoData.scenario;
+  const rules = getResponseRules(scenario);
+
+  const low = nearestLowPoint(lngLat.lat, lngLat.lng, rules.LOW_POINT_SNAP_MAX_M, geoData);
+  if (low.dataMissing) return { accepted: false, reason: 'The chronic low-point layer has not loaded.' };
+  if (!low.found) {
+    return { accepted: false, reason: 'That is not a known chronic low point — click a flagged low point (blue dot on the map).' };
+  }
+
+  const flood = isPointInFloodExtent(lngLat.lat, lngLat.lng, scenario, geoData);
+  const currentDepthM = (flood.ok && flood.inFlood) ? flood.depth_m : 0;
+
+  return {
+    accepted: true,
+    payload: {
+      lng: lngLat.lng, lat: lngLat.lat,
+      lowPointKind: low.props.kind, dropM: low.props.drop_m, currentDepthM: currentDepthM,
+    },
+  };
+}
+
+// ---------------------------------------------------------------------
+// 3. Sewer / manhole overflow — a real road-junction node (proxy for a
+//    manhole) where water is actually surfacing. Distinct from an
+//    ordinary flood hazard: this carries a contamination warning.
+// ---------------------------------------------------------------------
+function resolveDrainSewerOverflow(lngLat, toolDef, geoData) {
+  const scenario = geoData.scenario;
+  const rules = getResponseRules(scenario);
+
+  const junction = nearestJunction(lngLat.lat, lngLat.lng, rules.JUNCTION_SNAP_MAX_M, rules.JUNCTION_MIN_DEGREE, geoData);
+  if (!junction.found) {
+    return {
+      accepted: false,
+      reason: junction.distanceM !== undefined
+        ? 'That is ' + Math.round(junction.distanceM) + 'm from the nearest road junction — click directly on a real intersection (3+ connecting roads).'
+        : 'No mapped road junction found near that point.',
+    };
+  }
+
+  const flood = isPointInFloodExtent(junction.lat, junction.lon, scenario, geoData);
+  if (!flood.ok) return { accepted: false, reason: 'That junction ' + flood.reason + '.' };
+  if (!flood.inFlood) {
+    return { accepted: false, reason: 'No water is registering at this junction — nothing overflowing to flag.' };
+  }
+
+  return {
+    accepted: true,
+    payload: { lng: junction.lon, lat: junction.lat, junctionDegree: junction.degree, depthM: flood.depth_m },
+  };
+}
+
+// ---------------------------------------------------------------------
+// 4. Standing water / vector-control — must be currently wet; the
+//    72h+ persistence threshold (the standard window before mosquito
+//    larvae reach adulthood) is enforced by the existing generic
+//    numeric-field validator via the durationHr field's min:72, not
+//    duplicated here.
+// ---------------------------------------------------------------------
+function resolveDrainVectorControl(lngLat, toolDef, geoData) {
+  const scenario = geoData.scenario;
+  const flood = isPointInFloodExtent(lngLat.lat, lngLat.lng, scenario, geoData);
+  if (!flood.ok) return { accepted: false, reason: 'That point ' + flood.reason + '.' };
+  if (!flood.inFlood) {
+    return { accepted: false, reason: 'No standing water at that point — there is nothing to flag for vector control.' };
+  }
+  return { accepted: true, payload: { lng: lngLat.lng, lat: lngLat.lat, depthM: flood.depth_m } };
+}
+
+// ---------------------------------------------------------------------
+// 5. Temporary diversion / bypass — connects a currently flooded point
+//    to the nearest point ALONG THE WATERWAY that is genuinely less
+//    backed up (a real capacity gradient).
+//
+// Scans waterway VERTICES within the search radius across every mapped
+// waterway feature, not just the single segment nearest the origin.
+// waterways.geojson digitises the nullah as ~215 separate short
+// LineString pieces, not one continuous line — walking outward along
+// only the origin's own nearest piece can exhaust that piece's length
+// well before reaching the intended search radius, so a genuinely
+// closer/shallower point on the NEXT piece downstream would never be
+// considered. Scanning every feature's vertices treats the network as
+// what it physically is: one connected channel.
+// ---------------------------------------------------------------------
+function resolveDrainBypass(lngLat, toolDef, geoData) {
+  const scenario = geoData.scenario;
+  const rules = getResponseRules(scenario);
+
+  const origin = isPointInFloodExtent(lngLat.lat, lngLat.lng, scenario, geoData);
+  if (!origin.ok) return { accepted: false, reason: 'That point ' + origin.reason + '.' };
+  if (!origin.inFlood) {
+    return { accepted: false, reason: 'That point is not currently flooded — a bypass connects a flooded low point to somewhere it can drain, not dry ground.' };
+  }
+
+  const waterways = geoData.waterwaysGeoJSON;
+  if (!waterways || !waterways.features || waterways.features.length === 0) {
+    return { accepted: false, reason: 'Waterway data has not loaded — cannot find a bypass target.' };
+  }
+  const originPt = turf.point([lngLat.lng, lngLat.lat]);
+
+  let best = null;
+  const seen = new Set();
+  for (const wf of waterways.features) {
+    if (!wf.geometry || wf.geometry.type !== 'LineString') continue;
+    for (const [clon, clat] of wf.geometry.coordinates) {
+      const key = clon + ',' + clat;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const distM = turf.distance(originPt, turf.point([clon, clat]), { units: 'meters' });
+      if (distM > rules.BYPASS_SEARCH_MAX_M) continue;
+      if (best && distM >= best.distanceM) continue;
+      const cf = isPointInFloodExtent(clat, clon, scenario, geoData);
+      if (!cf.ok) continue;
+      const candDepth = cf.inFlood ? cf.depth_m : 0;
+      if (candDepth < origin.depth_m) {
+        best = { lon: clon, lat: clat, depthM: candDepth, distanceM: distM };
+      }
+    }
+  }
+
+  if (!best) {
+    return {
+      accepted: false,
+      reason: 'No functioning drain segment found within ' + rules.BYPASS_SEARCH_MAX_M + 'm along the nullah — the whole nearby channel is equally backed up, so there is nowhere to bypass to yet.',
+    };
+  }
+
+  return {
+    accepted: true,
+    payload: {
+      lng: lngLat.lng, lat: lngLat.lat,
+      originDepthM: origin.depth_m,
+      destLng: best.lon, destLat: best.lat, destDepthM: best.depthM, distanceM: best.distanceM,
+      bypassLine: [[lngLat.lng, lngLat.lat], [best.lon, best.lat]],
+    },
+  };
+}
+
+// =======================================================================
+// DAM RELEASE response validation.
+//
+// Built entirely around real, documented lead time: Rawal Dam releases
+// into Korang Nullah with sirens sounded ~30 minutes before gates open
+// and an announced opening time/duration. That means, unlike every other
+// scenario here, there is a genuine countdown to compute rather than a
+// binary "is this point wet" check -- so every action below centres on
+// arrival-time math, not depth or a risk-zone layer.
+// =======================================================================
+
+function haversineKm(lat1, lon1, lat2, lon2) {
+  const R = 6371;
+  const dLat = (lat2 - lat1) * Math.PI / 180;
+  const dLon = (lon2 - lon1) * Math.PI / 180;
+  const a = Math.sin(dLat / 2) ** 2 +
+    Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * Math.sin(dLon / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+function isWithinModeledArea(lat, lon, geoData) {
+  return !!floodGridIndex(lat, lon, geoData && geoData.floodGrid);
+}
+
+// The most recently placed release-rate tracking marker drives the
+// countdown everywhere else -- placing a new one with a different
+// discharge rate immediately changes what every subsequent placement
+// computes, which is the whole point of Action 5.
+function currentDischargeCusecs(geoData, rules) {
+  const trackers = (geoData.markers || []).filter(function (m) { return m.type === 'damReleaseTracking'; });
+  if (trackers.length === 0) return rules.REFERENCE_DISCHARGE_CUSECS;
+  const latest = trackers.reduce(function (a, b) { return a._uid > b._uid ? a : b; });
+  const cusecs = latest.params && Number(latest.params.dischargeCusecs);
+  return cusecs > 0 ? cusecs : rules.REFERENCE_DISCHARGE_CUSECS;
+}
+
+// Straight-line distance from Rawal Dam, and the estimated minutes for
+// the release wave to reach that point, given the current discharge
+// rate. This is the countdown every dam-release action is built around.
+function damArrival(lat, lon, dischargeCusecs, rules) {
+  const distanceKm = haversineKm(rules.RAWAL_DAM_LAT, rules.RAWAL_DAM_LON, lat, lon);
+  const factor = Math.min(rules.DISCHARGE_SPEED_MAX_FACTOR,
+    Math.max(rules.DISCHARGE_SPEED_MIN_FACTOR, dischargeCusecs / rules.REFERENCE_DISCHARGE_CUSECS));
+  const speedKmh = rules.FLOOD_WAVE_SPEED_KMH * factor;
+  const minutes = (distanceKm / speedKmh) * 60;
+  return { distanceKm: distanceKm, minutes: minutes, speedKmh: speedKmh };
+}
+
+function arrivalTier(minutes, rules) {
+  if (minutes < rules.ARRIVAL_TIER_IMMEDIATE_MIN) return 'immediate';
+  if (minutes < rules.ARRIVAL_TIER_SOON_MIN) return 'soon';
+  return 'later';
+}
+// Short urgency WORD, not the band's numeric range — pairing "30 min –
+// 2 hr" next to the zone's own actual countdown (e.g. "~32 min") read as
+// two conflicting numbers to a first-time user. A plain word next to the
+// one real number it belongs to is unambiguous.
+function tierLabel(tier) {
+  if (tier === 'immediate') return 'Immediate';
+  if (tier === 'soon') return 'Soon';
+  return 'Later';
+}
+function tierTone(tier) {
+  if (tier === 'immediate') return 'critical';
+  if (tier === 'soon') return 'bad';
+  return 'warn';
+}
+function formatCountdown(minutes) {
+  if (minutes < 60) return '~' + Math.round(minutes) + ' min';
+  const hr = Math.floor(minutes / 60);
+  const min = Math.round(minutes % 60);
+  return '~' + hr + 'hr ' + min + 'min';
+}
+
+// Buildings/hospitals inside a time-tiered evacuation zone -- the
+// dam-release equivalent of the river/rainfall zone-stats helpers,
+// built independently since this zone is banded by arrival TIME, not
+// by a flood depth or a risk-zone polygon.
+function computeDamZoneStats(lat, lon, radiusM, geoData) {
+  const stats = { radiusM: radiusM, buildingCount: 0, hospitals: [], critical: false };
+  if (!radiusM || radiusM <= 0) return stats;
+  stats.buildingCount = countBuildingsWithin(lat, lon, radiusM, geoData);
+
+  const center = turf.point([lon, lat]);
+  const facilities = geoData.facilitiesGeoJSON;
+  if (facilities && facilities.features) {
+    for (const f of facilities.features) {
+      const amenity = f.properties && f.properties.amenity;
+      if (EVAC_HOSPITAL_AMENITIES.indexOf(amenity) === -1) continue;
+      const c = featureCentroidLonLat(f);
+      if (!c) continue;
+      if (turf.distance(center, turf.point(c), { units: 'meters' }) <= radiusM) {
+        stats.hospitals.push((f.properties && f.properties.name) || ('Unnamed ' + amenity));
+      }
+    }
+  }
+  stats.critical = stats.hospitals.length > 0;
+  return stats;
+}
+
+// ---------------------------------------------------------------------
+// 5. Release-rate tracking — a status reading, not a site-safety check.
+//    Valid anywhere in the modeled area; its only job is to carry the
+//    discharge figure that Actions 1/2/4 read.
+// ---------------------------------------------------------------------
+function resolveDamReleaseTracking(lngLat, toolDef, geoData) {
+  if (!isWithinModeledArea(lngLat.lat, lngLat.lng, geoData)) {
+    return { accepted: false, reason: 'That point falls outside the modeled area.' };
+  }
+  return { accepted: true, payload: { lng: lngLat.lng, lat: lngLat.lat } };
+}
+
+// ---------------------------------------------------------------------
+// 1. Dam-release warning point — a real countdown, computed from the
+//    dam's known distance and the current discharge rate, not a static
+//    alert icon. Anywhere reachable, like the other scenarios' warning
+//    points, snapping to a real mosque/school within range.
+// ---------------------------------------------------------------------
+function resolveDamWarningPoint(lngLat, toolDef, geoData) {
+  const scenario = geoData.scenario;
+  const rules = getResponseRules(scenario);
+
+  if (!isWithinModeledArea(lngLat.lat, lngLat.lng, geoData)) {
+    return { accepted: false, reason: 'That point falls outside the modeled area.' };
+  }
+
+  const candidate = nearestFacility(lngLat.lat, lngLat.lng, WARNING_SNAP_AMENITIES, geoData, rules.WARNING_SNAP_MAX_M);
+  const snapped = candidate.found ? candidate : null;
+  const site = snapped || { lat: lngLat.lat, lon: lngLat.lng };
+
+  const discharge = currentDischargeCusecs(geoData, rules);
+  const arrival = damArrival(site.lat, site.lon, discharge, rules);
+
+  return {
+    accepted: true,
+    payload: {
+      lng: site.lon, lat: site.lat,
+      snappedFacilityName: snapped ? facilityDescription(snapped) : null,
+      snappedFacilityAmenity: snapped ? snapped.amenity : null,
+      snapDistanceM: snapped ? snapped.distanceM : null,
+      distanceFromDamKm: arrival.distanceKm,
+      arrivalMinutes: arrival.minutes,
+      dischargeCusecs: discharge,
+    },
+  };
+}
+
+// ---------------------------------------------------------------------
+// 2. Time-tiered evacuation zone — banded by wave-arrival time from the
+//    dam, not one flat radius. The tier is computed at the zone's own
+//    centre point.
+// ---------------------------------------------------------------------
+function resolveDamEvacZone(lngLat, toolDef, geoData) {
+  const scenario = geoData.scenario;
+  const rules = getResponseRules(scenario);
+
+  if (!isWithinModeledArea(lngLat.lat, lngLat.lng, geoData)) {
+    return { accepted: false, reason: 'That point falls outside the modeled area.' };
+  }
+
+  const discharge = currentDischargeCusecs(geoData, rules);
+  const arrival = damArrival(lngLat.lat, lngLat.lng, discharge, rules);
+  const tier = arrivalTier(arrival.minutes, rules);
+
+  return {
+    accepted: true,
+    payload: {
+      lng: lngLat.lng, lat: lngLat.lat,
+      distanceFromDamKm: arrival.distanceKm, arrivalMinutes: arrival.minutes,
+      tier: tier, dischargeCusecs: discharge,
+    },
+  };
+}
+
+// ---------------------------------------------------------------------
+// 3. Bridge / crossing closure — triggered by an active release (real
+//    current/velocity danger), not by measured depth. Must be a real
+//    point on the mapped waterway (a footbridge/informal crossing has
+//    to actually be over the channel).
+// ---------------------------------------------------------------------
+function resolveDamCrossingClosure(lngLat, toolDef, geoData) {
+  const scenario = geoData.scenario;
+  const rules = getResponseRules(scenario);
+
+  if (!scenario.severity || scenario.severity <= 0) {
+    return {
+      accepted: false,
+      reason: 'No active release above the safe-release threshold yet — currents here are not considered dangerous. (This checks whether gates are actually open, not water depth.)',
+    };
+  }
+
+  const waterways = geoData.waterwaysGeoJSON;
+  if (!waterways || !waterways.features || waterways.features.length === 0) {
+    return { accepted: false, reason: 'Waterway data has not loaded — cannot confirm this is a real crossing.' };
+  }
+  const nearest = turf.nearestPointOnLine(waterways, turf.point([lngLat.lng, lngLat.lat]), { units: 'meters' });
+  if (nearest.properties.dist > rules.CROSSING_SNAP_MAX_M) {
+    return {
+      accepted: false,
+      reason: 'That click is ' + Math.round(nearest.properties.dist) + 'm from the nullah — click directly on a footbridge or informal crossing over the channel.',
+    };
+  }
+
+  const [clon, clat] = nearest.geometry.coordinates;
+  const discharge = currentDischargeCusecs(geoData, rules);
+  const arrival = damArrival(clat, clon, discharge, rules);
+
+  return {
+    accepted: true,
+    payload: {
+      lng: clon, lat: clat,
+      distanceFromDamKm: arrival.distanceKm, arrivalMinutes: arrival.minutes, dischargeCusecs: discharge,
+    },
+  };
+}
+
+// ---------------------------------------------------------------------
+// 4. High-ground rally point — dry ground close enough to the nullah to
+//    reach ON FOOT before the wave gets there, not just "elevated" in
+//    the abstract. Ties directly into the same countdown as Action 1.
+// ---------------------------------------------------------------------
+function resolveDamRallyPoint(lngLat, toolDef, geoData) {
+  const scenario = geoData.scenario;
+  const rules = getResponseRules(scenario);
+
+  const ground = isPointOnSafeGround(lngLat.lat, lngLat.lng, scenario, geoData, rules.RALLY_SAFE_CLEARANCE_M);
+  if (!ground.ok) return { accepted: false, reason: 'That point ' + ground.reason + '.' };
+  if (!ground.safe) {
+    return { accepted: false, reason: 'That point ' + ground.reason + ' — a rally point has to be on ground the surge cannot reach.' };
+  }
+
+  const waterways = geoData.waterwaysGeoJSON;
+  if (!waterways || !waterways.features || waterways.features.length === 0) {
+    return { accepted: false, reason: 'Waterway data has not loaded — cannot check reachability from the nullah.' };
+  }
+  const nearest = turf.nearestPointOnLine(waterways, turf.point([lngLat.lng, lngLat.lat]), { units: 'meters' });
+  const distToWaterwayM = nearest.properties.dist;
+  const walkMinutes = (distToWaterwayM / 1000 / rules.WALK_SPEED_KMH) * 60;
+
+  const [clon, clat] = nearest.geometry.coordinates;
+  const discharge = currentDischargeCusecs(geoData, rules);
+  const arrival = damArrival(clat, clon, discharge, rules);
+
+  if (walkMinutes > arrival.minutes * rules.RALLY_REACTION_FRACTION) {
+    return {
+      accepted: false,
+      reason: 'Too far from the nullah to reach on foot with real reaction time to spare: ~' + Math.round(walkMinutes) +
+        'min walk from the nearest point on the channel, but the wave arrives there in ~' + Math.round(arrival.minutes) + 'min. Pick somewhere closer to the water.',
+    };
+  }
+
+  return {
+    accepted: true,
+    payload: {
+      lng: lngLat.lng, lat: lngLat.lat,
+      walkMinutes: walkMinutes, arrivalMinutes: arrival.minutes,
+      distanceFromDamKm: arrival.distanceKm, dischargeCusecs: discharge,
+    },
+  };
+}
+
 function checkResponseReady(toolDef, geoData) {
   const scenario = geoData && geoData.scenario;
+  const causeType = scenario && scenario.cause_type;
   const rules = getResponseRules(scenario);
   if (!rules) {
     return {
       accepted: false,
-      reason: 'Response-plan validation is only implemented for River Overflow so far. This simulation is ' +
+      reason: 'Response-plan validation is only implemented for River Overflow, Rainfall, Drainage Failure and Dam Release so far. This simulation is ' +
         scenarioLabel(scenario) + ', which needs its own thresholds (different warning time and water behaviour), so placements are blocked rather than checked against the wrong rules.',
     };
   }
+
+  if (causeType === 'rainfall') {
+    if (!scenario.rainfall_band || !scenario.rainfall_band.band) {
+      return { accepted: false, reason: 'This rainfall simulation has no PMD band recorded — re-run it from the map page.' };
+    }
+    if (!geoData.drainageRiskGeoJSON || !geoData.roadLowPointsGeoJSON) {
+      return { accepted: false, reason: 'Still loading the drainage-risk layer for this simulation — try again in a moment.' };
+    }
+    return null;
+  }
+
   if (!geoData.floodGrid) {
     return { accepted: false, reason: 'Still loading this simulation\'s flood depth data — try again in a moment.' };
   }
@@ -1646,8 +3197,106 @@ function requireSafeGround(lngLat, toolDef, geoData) {
   return { ground: ground };
 }
 
+// A priority evacuation zone must already exist and be within reach —
+// river_overflow's own version of the same check the rainfall/dam-release
+// scenarios already run against their own evacuation-zone marker types.
+// Not merged into requireNearRainfallEvacZone() so that function's tested
+// rainfall path is never touched by this change.
+function requireNearRiverEvacZone(lngLat, geoData, rules) {
+  const zones = (geoData.markers || []).filter(function (m) { return m.type === 'evacuationZone'; });
+  if (zones.length === 0) {
+    return { rejection: { accepted: false, reason: 'Add a priority evacuation zone first — this action exists to serve one.' } };
+  }
+  const pt = turf.point([lngLat.lng, lngLat.lat]);
+  let nearestM = Infinity;
+  zones.forEach(function (z) {
+    const d = turf.distance(pt, turf.point([z.lon, z.lat]), { units: 'meters' });
+    if (d < nearestM) nearestM = d;
+  });
+  if (nearestM > rules.EVAC_ZONE_EXISTS_MAX_M) {
+    return {
+      rejection: {
+        accepted: false,
+        reason: 'The nearest evacuation zone is ' + Math.round(nearestM) + 'm away — too far to serve it (needs to be within ' + rules.EVAC_ZONE_EXISTS_MAX_M + 'm).',
+      },
+    };
+  }
+  return { nearestZoneM: nearestM };
+}
+
+// ---------------------------------------------------------------------
+// RESPONSE ACTION — Relief camp / medical post (MERGED)
+//
+// Combines the old "Relief camp / shelter" and "Medical / first-aid
+// post" into one pin with two independent optional capacity fields.
+// Placement rule: outside the flood polygon (no exceptions), on an open
+// road, and within walking distance of an existing evacuation zone —
+// each check reused verbatim from what was already built (requireSafeGround,
+// requireOpenRoad, the school/hospital facility lookups), just combined
+// behind one click.
+// ---------------------------------------------------------------------
+function resolveReliefMedicalPost(lngLat, toolDef, geoData) {
+  const scenario = geoData.scenario;
+  const rules = getResponseRules(scenario);
+
+  const zoneCheck = requireNearRiverEvacZone(lngLat, geoData, rules);
+  if (zoneCheck.rejection) return zoneCheck.rejection;
+
+  const safe = requireSafeGround(lngLat, toolDef, geoData);
+  if (safe.rejection) return safe.rejection;
+
+  const roadCheck = requireOpenRoad(lngLat, geoData, rules);
+  if (roadCheck.rejection) return roadCheck.rejection;
+  const road = roadCheck.road;
+
+  // Snap onto a real school/shelter if one is close AND itself safe (from
+  // the old relief-camp behaviour) — never pulls the point toward water.
+  let snapped = null;
+  const candidate = nearestFacility(lngLat.lat, lngLat.lng, SHELTER_AMENITIES, geoData, rules.SHELTER_SNAP_MAX_M);
+  if (candidate.found) {
+    const candidateGround = isPointOnSafeGround(candidate.lat, candidate.lon, scenario, geoData);
+    if (candidateGround.ok && candidateGround.safe) {
+      snapped = candidate;
+    }
+  }
+  const site = snapped || { lat: lngLat.lat, lon: lngLat.lng };
+  const ground = snapped
+    ? isPointOnSafeGround(snapped.lat, snapped.lon, scenario, geoData)
+    : safe.ground;
+
+  // Nearest real hospital, as reference info only (from the old
+  // medical-post behaviour) — never blocks the placement.
+  const hospital = nearestFacility(lngLat.lat, lngLat.lng, EVAC_HOSPITAL_AMENITIES, geoData);
+
+  return {
+    accepted: true,
+    payload: {
+      lng: site.lon,
+      lat: site.lat,
+      nearestZoneM: zoneCheck.nearestZoneM,
+      nearestFloodM: ground.nearestFloodM,
+      roadName: road.name,
+      roadHighwayType: road.highwayType,
+      roadDistanceM: road.distanceM,
+      snappedFacilityName: snapped ? facilityDescription(snapped) : null,
+      snappedFacilityAmenity: snapped ? snapped.amenity : null,
+      snapDistanceM: snapped ? snapped.distanceM : null,
+      rejectedSnapReason: (!snapped && candidate.found)
+        ? 'the nearest ' + amenityLabel(candidate.amenity) + ' is itself too close to the water'
+        : null,
+      nearestHospitalName: hospital.distanceM !== null ? facilityDescription(hospital) : null,
+      nearestHospitalM: hospital.distanceM,
+    },
+  };
+}
+
 // ---------------------------------------------------------------------
 // RESPONSE ACTION 4 — Relief camp / shelter
+//
+// SUPERSEDED by resolveReliefMedicalPost above (merged with the medical
+// post action) — no longer reachable from RESPONSE_TOOLS/RESPONSE_RESOLVERS,
+// left in place only because resolveReliefMedicalPost reuses its logic
+// inline rather than calling it.
 //
 // Must be clear of the flood, no exceptions. If a real school, community
 // centre or similar sits close by, the camp snaps onto it — using a
@@ -2038,7 +3687,7 @@ function nextUid() { return _nextUid++; }
 
 function buildDefaultForms() {
   const defaults = {};
-  PREVENTION_TOOLS.concat(RESPONSE_TOOLS).concat(CUSTOM_ACTIONS).forEach(function (tool) {
+  PREVENTION_TOOLS.concat(RESPONSE_TOOLS).concat(RAINFALL_RESPONSE_TOOLS).concat(DRAINAGE_FAILURE_RESPONSE_TOOLS).concat(DAM_RELEASE_RESPONSE_TOOLS).concat(CUSTOM_ACTIONS).forEach(function (tool) {
     if (!tool.formFields) return;
     const form = {};
     tool.formFields.forEach(function (f) { if (f.default !== undefined) form[f.key] = f.default; });
@@ -2075,13 +3724,24 @@ function resolvePlacement(lngLat, toolDef, geoData) {
     floodedRoad: resolveCloseFloodedRoad,
     boatLaunch: resolveBoatLaunch,
     evacuationZone: resolveEvacuationZone,
-    reliefCamp: resolveReliefCamp,
-    medicalPost: resolveMedicalPost,
-    supplyPoint: resolveSupplyPoint,
-    dewatering: resolveDewatering,
-    helipad: resolveHelipad,
-    diversion: resolveDiversion,
+    reliefMedicalPost: resolveReliefMedicalPost,
     warningPoint: resolveWarningPoint,
+    rainWarning: resolveRainWarning,
+    rainEvacZone: resolveRainEvacZone,
+    rainRoadClosure: resolveRainRoadClosure,
+    rainWaterRescue: resolveRainWaterRescue,
+    rainMedicalPost: resolveRainMedicalPost,
+    rainReliefCamp: resolveRainReliefCamp,
+    drainBlockageClearance: resolveDrainBlockageClearance,
+    drainPumpDeployment: resolveDrainPumpDeployment,
+    drainSewerOverflow: resolveDrainSewerOverflow,
+    drainVectorControl: resolveDrainVectorControl,
+    drainBypass: resolveDrainBypass,
+    damReleaseTracking: resolveDamReleaseTracking,
+    damWarningPoint: resolveDamWarningPoint,
+    damEvacZone: resolveDamEvacZone,
+    damCrossingClosure: resolveDamCrossingClosure,
+    damRallyPoint: resolveDamRallyPoint,
   };
   const responseResolver = RESPONSE_RESOLVERS[toolDef.targetType];
   if (responseResolver) {
@@ -2171,6 +3831,7 @@ function buildMarker(toolDef, payload, params, planType) {
   if (payload.targetSegmentName) marker.targetSegmentName = payload.targetSegmentName;
   if (payload.targetWaterwayId) marker.targetWaterwayId = payload.targetWaterwayId;
   if (payload.clickedBuilding) marker.clickedBuilding = payload.clickedBuilding;
+  if (payload.bypassLine) marker.bypassLine = payload.bypassLine;
   // Measured facts from a response placement (depth, road access, zone
   // contents). Kept on the marker so the plan list shows what was
   // actually checked, not just what was clicked.
@@ -2590,6 +4251,8 @@ export default function PlanWorkspace() {
   const waterBodiesDataRef = useRef(null);
   const facilitiesDataRef = useRef(null);
   const greeneryDataRef = useRef(null);
+  const drainageRiskDataRef = useRef(null);
+  const roadLowPointsDataRef = useRef(null);
   // Pre-computed [lon, lat] per building, so counting buildings inside an
   // evacuation zone stays cheap while the radius is being typed.
   const buildingPointsRef = useRef(null);
@@ -2618,6 +4281,7 @@ export default function PlanWorkspace() {
   const [pendingCustomAction, setPendingCustomAction] = useState(null);
   const [undoStack, setUndoStack] = useState([]);
   const [floodGridStatus, setFloodGridStatus] = useState('loading');
+  const [rainfallLayersStatus, setRainfallLayersStatus] = useState('loading');
   const [toolNotice, setToolNotice] = useState(null);
   const [uncheckedHospitals, setUncheckedHospitals] = useState([]);
   // Route geometry is held in state (not written straight to the map) so a
@@ -2821,7 +4485,12 @@ export default function PlanWorkspace() {
   }, [showBreakdown, breakdownResult]);
 
   var causeType = scenario && scenario.cause_type;
-  const TOOLS = planType === 'response' ? RESPONSE_TOOLS : filterToolsByCauseType(PREVENTION_TOOLS, causeType);
+  const TOOLS = planType === 'response'
+    ? (causeType === 'rainfall' ? RAINFALL_RESPONSE_TOOLS
+      : causeType === 'drainage_failure' ? DRAINAGE_FAILURE_RESPONSE_TOOLS
+      : causeType === 'dam_release' ? DAM_RELEASE_RESPONSE_TOOLS
+      : RESPONSE_TOOLS)
+    : filterToolsByCauseType(PREVENTION_TOOLS, causeType);
   const responseRules = getResponseRules(scenario);
 
   // Single bundle of every data source a validator may need. Same idea as
@@ -2850,6 +4519,8 @@ export default function PlanWorkspace() {
       waterBodiesGeoJSON: waterBodiesDataRef.current,
       facilitiesGeoJSON: facilitiesDataRef.current,
       greeneryGeoJSON: greeneryDataRef.current,
+      drainageRiskGeoJSON: drainageRiskDataRef.current,
+      roadLowPointsGeoJSON: roadLowPointsDataRef.current,
       buildingPoints: buildingPointsRef.current,
       floodedRoadsGeoJSON: floodedRoadsFCRef.current,
       floodGrid: floodGridRef.current,
@@ -2888,6 +4559,34 @@ export default function PlanWorkspace() {
       window.removeEventListener('focus', checkDrift);
       document.removeEventListener('visibilitychange', checkDrift);
     };
+  }, [scenario]);
+
+  // Rainfall's own validation layers — terrain-derived drainage-risk
+  // zones and road low points (Backend/scripts/build_drainage_risk.py).
+  // Independent of the flood depth grid below: rainfall does not
+  // validate against a modeled flood extent, it validates against where
+  // urban drainage actually fails.
+  useEffect(() => {
+    if (!scenario) return;
+    let cancelled = false;
+
+    Promise.all([
+      fetch('/data/drainage_risk.geojson').then(function (r) { return r.json(); }),
+      fetch('/data/road_low_points.geojson').then(function (r) { return r.json(); }),
+    ])
+      .then(function (results) {
+        if (cancelled) return;
+        drainageRiskDataRef.current = results[0];
+        roadLowPointsDataRef.current = results[1];
+        setRainfallLayersStatus('ready');
+      })
+      .catch(function (err) {
+        if (cancelled) return;
+        console.error('drainage-risk layers failed', err);
+        setRainfallLayersStatus('error');
+      });
+
+    return function () { cancelled = true; };
   }, [scenario]);
 
   // Pull the real depth of the water at every cell, for the water level
@@ -3201,6 +4900,97 @@ export default function PlanWorkspace() {
         console.error('facilities.geojson failed (hospital/shelter checks will be skipped)', err);
       }
 
+      // The honest edge of the demo. On the page where actions are
+      // placed, a user must be able to see where terrain data stops --
+      // outside it, "no risk zone here" means "not modeled", not "safe".
+      try {
+        const modeled = await (await fetch('/data/modeled_area.geojson')).json();
+        map.addSource('modeled-area', { type: 'geojson', data: modeled });
+        map.addLayer({
+          id: 'modeled-area-outline',
+          type: 'line',
+          source: 'modeled-area',
+          paint: {
+            'line-color': '#D946EF',
+            'line-width': 3,
+            'line-dasharray': [3, 2],
+            'line-opacity': 0.9,
+          },
+        });
+      } catch (err) {
+        console.error('modeled_area.geojson failed', err);
+      }
+
+      // RAINFALL drainage-risk zones + road low points. Drawn on the plan
+      // page (not just the map page) because this is where actions are
+      // actually placed — a planner needs to see WHERE to click.
+      try {
+        const risk = await (await fetch('/data/drainage_risk.geojson')).json();
+        map.addSource('plan-drainage-risk', { type: 'geojson', data: risk });
+        map.addLayer({
+          id: 'plan-drainage-risk-fill',
+          type: 'fill',
+          source: 'plan-drainage-risk',
+          paint: {
+            'fill-color': [
+              'match', ['get', 'risk_class'],
+              'severe', '#b91c1c',
+              'high', '#ea580c',
+              'moderate', '#f59e0b',
+              '#f59e0b',
+            ],
+            'fill-opacity': 0.4,
+          },
+        });
+        map.addLayer({
+          id: 'plan-drainage-risk-outline',
+          type: 'line',
+          source: 'plan-drainage-risk',
+          paint: {
+            'line-color': [
+              'match', ['get', 'risk_class'],
+              'severe', '#7f1d1d',
+              'high', '#9a3412',
+              'moderate', '#92400e',
+              '#92400e',
+            ],
+            'line-width': 1,
+          },
+        });
+      } catch (err) {
+        console.error('drainage_risk.geojson failed (rainfall zone checks will be skipped)', err);
+      }
+
+      try {
+        const lowPts = await (await fetch('/data/road_low_points.geojson')).json();
+        map.addSource('plan-road-low-points', { type: 'geojson', data: lowPts });
+        map.addLayer({
+          id: 'plan-road-low-points-sag',
+          type: 'circle',
+          source: 'plan-road-low-points',
+          filter: ['==', ['get', 'kind'], 'sag'],
+          paint: {
+            'circle-radius': ['interpolate', ['linear'], ['zoom'], 12, 2, 18, 4],
+            'circle-color': '#0891b2',
+            'circle-opacity': 0.5,
+          },
+        });
+        map.addLayer({
+          id: 'plan-road-low-points-underpass',
+          type: 'circle',
+          source: 'plan-road-low-points',
+          filter: ['==', ['get', 'kind'], 'underpass'],
+          paint: {
+            'circle-radius': ['interpolate', ['linear'], ['zoom'], 12, 4, 18, 9],
+            'circle-color': '#1d4ed8',
+            'circle-stroke-width': 2,
+            'circle-stroke-color': '#ffffff',
+          },
+        });
+      } catch (err) {
+        console.error('road_low_points.geojson failed (rainfall road-closure checks will be skipped)', err);
+      }
+
       // Green spaces — open ground for helicopter landing zones (Phase 3).
       try {
         const greenery = await (await fetch('/data/greenery.geojson')).json();
@@ -3292,6 +5082,27 @@ export default function PlanWorkspace() {
         }, 0);
       });
 
+      // Temporary diversion / bypass paths (Drainage Failure). A simple
+      // straight connector, not a terrain-aligned structure like the
+      // embankment line -- this marks an intended flow path for a works
+      // crew, not a permanent build.
+      map.addSource('drain-bypass-lines', {
+        type: 'geojson',
+        data: { type: 'FeatureCollection', features: [] },
+      });
+      map.addLayer({
+        id: 'drain-bypass-lines-outline',
+        type: 'line',
+        source: 'drain-bypass-lines',
+        paint: { 'line-color': '#ffffff', 'line-width': 6, 'line-opacity': 0.9 },
+      });
+      map.addLayer({
+        id: 'drain-bypass-lines-layer',
+        type: 'line',
+        source: 'drain-bypass-lines',
+        paint: { 'line-color': '#6d28d9', 'line-width': 3, 'line-dasharray': [1, 1.4] },
+      });
+
       map.addSource('evacuation-zones', {
         type: 'geojson',
         data: { type: 'FeatureCollection', features: [] },
@@ -3367,6 +5178,49 @@ export default function PlanWorkspace() {
         },
         paint: {
           'text-color': '#92400e',
+          'text-halo-color': '#ffffff',
+          'text-halo-width': 2.5,
+        },
+      });
+
+      // Dam-release time-tiered evacuation zones. Colour bands the real
+      // wave-arrival tier (immediate / soon / later), not a flat colour
+      // like the other evacuation zones -- that tiering IS the point of
+      // this action.
+      map.addSource('dam-tier-zones', {
+        type: 'geojson',
+        data: { type: 'FeatureCollection', features: [] },
+      });
+      map.addLayer({
+        id: 'dam-tier-zones-fill',
+        type: 'fill',
+        source: 'dam-tier-zones',
+        paint: {
+          'fill-color': ['match', ['get', 'tier'], 'immediate', '#dc2626', 'soon', '#f59e0b', '#0ea5e9'],
+          'fill-opacity': 0.16,
+        },
+      });
+      map.addLayer({
+        id: 'dam-tier-zones-outline',
+        type: 'line',
+        source: 'dam-tier-zones',
+        paint: {
+          'line-color': ['match', ['get', 'tier'], 'immediate', '#991b1b', 'soon', '#92400e', '#0369a1'],
+          'line-width': 2.5,
+        },
+      });
+      map.addLayer({
+        id: 'dam-tier-zones-label',
+        type: 'symbol',
+        source: 'dam-tier-zones',
+        layout: {
+          'text-field': ['get', 'zoneLabel'],
+          'text-size': 11,
+          'text-offset': [0, -0.6],
+          'text-allow-overlap': true,
+        },
+        paint: {
+          'text-color': ['match', ['get', 'tier'], 'immediate', '#991b1b', 'soon', '#92400e', '#0369a1'],
           'text-halo-color': '#ffffff',
           'text-halo-width': 2.5,
         },
@@ -3535,7 +5389,12 @@ export default function PlanWorkspace() {
 
         if (toolKey) {
           var clickCauseType = scenario && scenario.cause_type;
-          const pool = planTypeRef.current === 'response' ? RESPONSE_TOOLS : filterToolsByCauseType(PREVENTION_TOOLS, clickCauseType);
+          const pool = planTypeRef.current === 'response'
+            ? (clickCauseType === 'rainfall' ? RAINFALL_RESPONSE_TOOLS
+              : clickCauseType === 'drainage_failure' ? DRAINAGE_FAILURE_RESPONSE_TOOLS
+              : clickCauseType === 'dam_release' ? DAM_RELEASE_RESPONSE_TOOLS
+              : RESPONSE_TOOLS)
+            : filterToolsByCauseType(PREVENTION_TOOLS, clickCauseType);
           const toolDef = pool.find(function (t) { return t.key === toolKey; });
 
           // Check if this is a custom action from CUSTOM_ACTIONS registry
@@ -3679,6 +5538,26 @@ export default function PlanWorkspace() {
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !map.getSource) return;
+    const src = map.getSource('drain-bypass-lines');
+    if (!src) return;
+
+    const bypasses = markers.filter(function (m) { return m.type === 'drainBypass' && m.bypassLine; });
+
+    src.setData({
+      type: 'FeatureCollection',
+      features: bypasses.map(function (m) {
+        return {
+          type: 'Feature',
+          properties: {},
+          geometry: { type: 'LineString', coordinates: m.bypassLine },
+        };
+      }),
+    });
+  }, [markers]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !map.getSource) return;
     const src = map.getSource('warning-zones');
     if (!src) return;
 
@@ -3693,6 +5572,36 @@ export default function PlanWorkspace() {
         const circle = turf.circle([m.lon, m.lat], radiusM / 1000, { steps: 64, units: 'kilometers' });
         circle.properties = {
           zoneLabel: 'Warning ' + (i + 1) + ' · ' + Math.round(radiusM) + 'm',
+        };
+        return circle;
+      }),
+    });
+  }, [markers]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !map.getSource) return;
+    const src = map.getSource('dam-tier-zones');
+    if (!src) return;
+
+    const zones = markers.filter(function (m) {
+      return m.type === 'damEvacZone' && m.params && Number(m.params.radiusM) > 0;
+    });
+
+    src.setData({
+      type: 'FeatureCollection',
+      features: zones.map(function (m, i) {
+        const radiusM = Number(m.params.radiusM);
+        const tier = (m.info && m.info.tier) || 'later';
+        const arrivalMinutes = m.info && m.info.arrivalMinutes;
+        const circle = turf.circle([m.lon, m.lat], radiusM / 1000, { steps: 64, units: 'kilometers' });
+        circle.properties = {
+          tier: tier,
+          // Word + real countdown, readable straight off the map without
+          // clicking — e.g. "Zone 1 · Soon · ~32 min", never a range next
+          // to a specific number that looked like it disagreed with it.
+          zoneLabel: 'Zone ' + (i + 1) + ' · ' + tierLabel(tier) +
+            (typeof arrivalMinutes === 'number' ? ' · ' + formatCountdown(arrivalMinutes) : ''),
         };
         return circle;
       }),
@@ -3846,8 +5755,13 @@ export default function PlanWorkspace() {
   // Identity of the diversion currently awaiting confirmation. Stamped on
   // the result so an answer from a PREVIOUS popup can never be shown
   // against a different placement.
-  const diversionCheckKey = (pendingAction && pendingAction.toolKey === 'diversion')
-    ? [pendingAction.lat, pendingAction.lng, pendingAction.closureU, pendingAction.closureV].join('|')
+  // Keyed on 'closeRoad' now that Road closure & diversion is one merged
+  // action: the check runs against the SAME road/point being closed (its
+  // own u/v, already on resolveCloseFloodedRoad's payload), asking "with
+  // this road closed too, does a detour still exist?" — not a separate
+  // pre-existing closure the way the old standalone diversion tool needed.
+  const diversionCheckKey = (pendingAction && pendingAction.toolKey === 'closeRoad')
+    ? [pendingAction.lat, pendingAction.lng, pendingAction.roadU, pendingAction.roadV].join('|')
     : null;
 
   useEffect(() => {
@@ -3860,8 +5774,8 @@ export default function PlanWorkspace() {
       body: JSON.stringify({
         diversion_lat: pendingAction.lat,
         diversion_lon: pendingAction.lng,
-        closure_u: pendingAction.closureU,
-        closure_v: pendingAction.closureV,
+        closure_u: pendingAction.roadU,
+        closure_v: pendingAction.roadV,
         water_level_m: scenario.water_level_m,
         closed_edges: closedEdgesPayload(),
       }),
@@ -4045,6 +5959,9 @@ export default function PlanWorkspace() {
     const toolKey = pendingAction.toolKey;
     const toolDef = PREVENTION_TOOLS.find(function (t) { return t.key === toolKey; })
       || RESPONSE_TOOLS.find(function (t) { return t.key === toolKey; })
+      || RAINFALL_RESPONSE_TOOLS.find(function (t) { return t.key === toolKey; })
+      || DRAINAGE_FAILURE_RESPONSE_TOOLS.find(function (t) { return t.key === toolKey; })
+      || DAM_RELEASE_RESPONSE_TOOLS.find(function (t) { return t.key === toolKey; })
       || CUSTOM_ACTIONS.find(function (a) { return a.key === toolKey; });
     const forms = actionForms[toolKey] || {};
 
@@ -4093,6 +6010,16 @@ export default function PlanWorkspace() {
           return;
         }
       }
+    }
+
+    // Road closure & diversion: "valid only if an alternate route exists"
+    // is a hard gate, not advisory — checked here too (not just via the
+    // submit button's disabled state) so this can never be bypassed.
+    if (toolKey === 'closeRoad' && activeDiversionCheck && activeDiversionCheck.checked &&
+      activeDiversionCheck.alternative_exists === false) {
+      setToolError('No alternate route exists outside the flood — closing this road would cut this area off entirely. Pick a different closure point.');
+      setTimeout(function () { setToolError(null); }, 5000);
+      return;
     }
 
     // Response actions have their own submit path — a road closure is
@@ -4257,7 +6184,7 @@ export default function PlanWorkspace() {
 
     // Closing a road is not a marker — it changes which roads the rest of
     // the plan can use, so it stays in closedRoads where it already was.
-    if (toolDef.key === 'closeRoad') {
+    if (toolDef.key === 'closeRoad' || toolDef.key === 'rainRoadClosure') {
       const rawDuration = forms.durationHr;
       const durationHr = (rawDuration === undefined || rawDuration === null || String(rawDuration).trim() === '')
         ? null
@@ -4267,6 +6194,7 @@ export default function PlanWorkspace() {
       const closure = {
         _uid: roadUid,
         planType: 'response',
+        actionType: toolDef.key,
         roadIndex: pendingAction.floodedRoadIndex,
         lat: pendingAction.lat,
         lon: pendingAction.lng,
@@ -4277,9 +6205,14 @@ export default function PlanWorkspace() {
         depthM: pendingAction.depthM,
         durationHr: durationHr,
       };
+      if (toolDef.key === 'rainRoadClosure') {
+        closure.lowPointKind = pendingAction.lowPointKind;
+        closure.dropM = pendingAction.dropM;
+        closure.hasAlternate = pendingAction.hasAlternate;
+      }
       setClosedRoads(function (prev) { return prev.concat([closure]); });
       setUndoStack(function (prev) { return prev.concat([{ type: 'closedRoad', uid: roadUid }]); });
-      playInterventionAnimation(mapRef.current, 'closeRoad', pendingAction.lng, pendingAction.lat);
+      playInterventionAnimation(mapRef.current, toolDef.key, pendingAction.lng, pendingAction.lat);
       setPendingAction(null);
       return;
     }
@@ -4299,16 +6232,16 @@ export default function PlanWorkspace() {
       };
     } else if (toolDef.key === 'evacuationZone') {
       info = computeEvacuationZoneStats(pendingAction.lat, pendingAction.lng, Number(forms.radiusM), scenario, geoData);
-    } else if (toolDef.key === 'reliefCamp') {
+    } else if (toolDef.key === 'reliefMedicalPost') {
       info = {
+        nearestZoneM: pendingAction.nearestZoneM,
         nearestFloodM: pendingAction.nearestFloodM,
+        roadName: pendingAction.roadName,
+        roadHighwayType: pendingAction.roadHighwayType,
+        roadDistanceM: pendingAction.roadDistanceM,
         snappedFacilityName: pendingAction.snappedFacilityName,
         snappedFacilityAmenity: pendingAction.snappedFacilityAmenity,
         snapDistanceM: pendingAction.snapDistanceM,
-      };
-    } else if (toolDef.key === 'medicalPost') {
-      info = {
-        nearestFloodM: pendingAction.nearestFloodM,
         nearestHospitalName: pendingAction.nearestHospitalName,
         nearestHospitalM: pendingAction.nearestHospitalM,
       };
@@ -4357,6 +6290,96 @@ export default function PlanWorkspace() {
           selfFloodDepthM: pendingAction.selfFloodDepthM,
         }
       );
+    } else if (toolDef.key === 'rainWarning') {
+      info = Object.assign(
+        computeWarningCoverage(pendingAction.lat, pendingAction.lng, Number(forms.coverageRadiusM), geoData),
+        {
+          snappedFacilityName: pendingAction.snappedFacilityName,
+          snappedFacilityAmenity: pendingAction.snappedFacilityAmenity,
+          snapDistanceM: pendingAction.snapDistanceM,
+        }
+      );
+    } else if (toolDef.key === 'rainEvacZone') {
+      info = computeRainfallZoneStats(pendingAction.lat, pendingAction.lng, Number(forms.radiusM), geoData);
+    } else if (toolDef.key === 'rainWaterRescue') {
+      info = { zoneClass: pendingAction.zoneClass, zoneMaxSinkM: pendingAction.zoneMaxSinkM };
+    } else if (toolDef.key === 'rainMedicalPost') {
+      info = {
+        nearestZoneM: pendingAction.nearestZoneM,
+        roadName: pendingAction.roadName,
+        roadHighwayType: pendingAction.roadHighwayType,
+        roadDistanceM: pendingAction.roadDistanceM,
+        nearestHospitalName: pendingAction.nearestHospitalName,
+        nearestHospitalM: pendingAction.nearestHospitalM,
+      };
+    } else if (toolDef.key === 'rainReliefCamp') {
+      info = {
+        nearestZoneM: pendingAction.nearestZoneM,
+        roadName: pendingAction.roadName,
+        roadHighwayType: pendingAction.roadHighwayType,
+        roadDistanceM: pendingAction.roadDistanceM,
+        snappedFacilityName: pendingAction.snappedFacilityName,
+        snappedFacilityAmenity: pendingAction.snappedFacilityAmenity,
+        snapDistanceM: pendingAction.snapDistanceM,
+      };
+    } else if (toolDef.key === 'drainBlockageClearance') {
+      info = {
+        roadName: pendingAction.roadName,
+        roadHighwayType: pendingAction.roadHighwayType,
+        highwayClass: pendingAction.highwayClass,
+        depthM: pendingAction.depthM,
+      };
+    } else if (toolDef.key === 'drainPumpDeployment') {
+      info = {
+        lowPointKind: pendingAction.lowPointKind,
+        dropM: pendingAction.dropM,
+        currentDepthM: pendingAction.currentDepthM,
+      };
+    } else if (toolDef.key === 'drainSewerOverflow') {
+      info = {
+        junctionDegree: pendingAction.junctionDegree,
+        depthM: pendingAction.depthM,
+        contaminationWarning: true,
+      };
+    } else if (toolDef.key === 'drainVectorControl') {
+      info = { depthM: pendingAction.depthM };
+    } else if (toolDef.key === 'drainBypass') {
+      info = {
+        originDepthM: pendingAction.originDepthM,
+        destDepthM: pendingAction.destDepthM,
+        distanceM: pendingAction.distanceM,
+      };
+    } else if (toolDef.key === 'damWarningPoint') {
+      info = {
+        distanceFromDamKm: pendingAction.distanceFromDamKm,
+        arrivalMinutes: pendingAction.arrivalMinutes,
+        dischargeCusecs: pendingAction.dischargeCusecs,
+        snappedFacilityName: pendingAction.snappedFacilityName,
+        snappedFacilityAmenity: pendingAction.snappedFacilityAmenity,
+        snapDistanceM: pendingAction.snapDistanceM,
+      };
+    } else if (toolDef.key === 'damEvacZone') {
+      info = {
+        distanceFromDamKm: pendingAction.distanceFromDamKm,
+        arrivalMinutes: pendingAction.arrivalMinutes,
+        tier: pendingAction.tier,
+        dischargeCusecs: pendingAction.dischargeCusecs,
+      };
+    } else if (toolDef.key === 'damCrossingClosure') {
+      info = {
+        distanceFromDamKm: pendingAction.distanceFromDamKm,
+        arrivalMinutes: pendingAction.arrivalMinutes,
+        dischargeCusecs: pendingAction.dischargeCusecs,
+      };
+    } else if (toolDef.key === 'damRallyPoint') {
+      info = {
+        walkMinutes: pendingAction.walkMinutes,
+        arrivalMinutes: pendingAction.arrivalMinutes,
+        distanceFromDamKm: pendingAction.distanceFromDamKm,
+        dischargeCusecs: pendingAction.dischargeCusecs,
+      };
+    } else if (toolDef.key === 'damReleaseTracking') {
+      info = {};
     }
 
     const params = {};
@@ -4612,6 +6635,42 @@ export default function PlanWorkspace() {
     }
   }
 
+  function handlePrintReport() {
+    const items = buildReportItems(markers, closedRoads);
+    const counts = buildReportCounts(items);
+    const html = buildReportHtml(scenario, items, counts);
+    const w = window.open('', '_blank');
+    if (!w) {
+      setToolNotice('Your browser blocked the report window — allow pop-ups for this site and try again.');
+      setTimeout(function () { setToolNotice(null); }, 5000);
+      return;
+    }
+    w.document.open();
+    w.document.write(html);
+    w.document.close();
+    // document.write on a fresh window does not reliably fire 'load' in
+    // every browser, so a short fixed delay is more consistent than
+    // depending on onload before invoking the native print dialog.
+    setTimeout(function () {
+      try { w.focus(); w.print(); } catch (err) { /* user closed the tab */ }
+    }, 300);
+  }
+
+  function handleDownloadReportText() {
+    const items = buildReportItems(markers, closedRoads);
+    const counts = buildReportCounts(items);
+    const text = buildReportText(scenario, items, counts);
+    const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'mohafiz-response-plan-' + Date.now() + '.txt';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(function () { URL.revokeObjectURL(url); }, 2000);
+  }
+
   if (!scenario) {
     return (
       <div style={{ padding: 40, fontFamily: 'system-ui, sans-serif' }}>
@@ -4837,7 +6896,7 @@ export default function PlanWorkspace() {
       })()}
 
       {pendingAction && (function () {
-        const allTools = PREVENTION_TOOLS.concat(RESPONSE_TOOLS).concat(CUSTOM_ACTIONS).concat([CUSTOM_ACTION_TOOL]);
+        const allTools = PREVENTION_TOOLS.concat(RESPONSE_TOOLS).concat(RAINFALL_RESPONSE_TOOLS).concat(DRAINAGE_FAILURE_RESPONSE_TOOLS).concat(DAM_RELEASE_RESPONSE_TOOLS).concat(CUSTOM_ACTIONS).concat([CUSTOM_ACTION_TOOL]);
         const toolDef = allTools.find(function (t) { return t.key === pendingAction.toolKey; });
         if (!toolDef) return null;
         const forms = actionForms[pendingAction.toolKey] || {};
@@ -4885,12 +6944,16 @@ export default function PlanWorkspace() {
         };
 
         let submitLabel = toolDef.submitLabel || 'Add to plan';
-        // The check is advisory, not a veto — but committing against it
-        // should never feel like the default path.
-        const diversionDisagrees = pendingAction.toolKey === 'diversion' &&
-          activeDiversionCheck && activeDiversionCheck.checked &&
-          (activeDiversionCheck.upstream === false || activeDiversionCheck.alternative_exists === false);
-        if (diversionDisagrees) submitLabel = 'Add anyway';
+        // "Valid only if an alternate route exists" is a hard gate here
+        // (the old standalone diversion tool treated this as advisory —
+        // this merged action does not: a road closure with confirmed no
+        // detour cannot be submitted, not just discouraged).
+        const isCloseRoad = pendingAction.toolKey === 'closeRoad';
+        const closeRoadCheckPending = isCloseRoad && (!activeDiversionCheck || activeDiversionCheck.loading);
+        const closeRoadBlocked = isCloseRoad && activeDiversionCheck && activeDiversionCheck.checked &&
+          activeDiversionCheck.alternative_exists === false;
+        if (closeRoadCheckPending) submitLabel = 'Checking for a detour…';
+        else if (closeRoadBlocked) submitLabel = 'No alternate route';
         const inputStyle = { width: '100%', padding: 6, marginTop: 3, marginBottom: 8, borderRadius: 8, border: '1px solid #cbd5e1', boxSizing: 'border-box', fontSize: 13, fontWeight: 600, color: '#0f172a', background: '#ffffff' };
 
         return (
@@ -5000,7 +7063,14 @@ export default function PlanWorkspace() {
               </button>
               <button
                 onClick={submitPendingAction}
-                style={{ flex: 2, padding: 8, borderRadius: 9, border: 'none', background: diversionDisagrees ? '#b45309' : toolDef.color, color: 'white', fontWeight: 700, fontSize: 12, cursor: 'pointer' }}
+                disabled={closeRoadCheckPending || closeRoadBlocked}
+                style={{
+                  flex: 2, padding: 8, borderRadius: 9, border: 'none',
+                  background: closeRoadBlocked ? '#991b1b' : closeRoadCheckPending ? '#94a3b8' : toolDef.color,
+                  color: 'white', fontWeight: 700, fontSize: 12,
+                  cursor: (closeRoadCheckPending || closeRoadBlocked) ? 'not-allowed' : 'pointer',
+                  opacity: (closeRoadCheckPending || closeRoadBlocked) ? 0.85 : 1,
+                }}
               >
                 {submitLabel}
               </button>
@@ -5040,11 +7110,24 @@ export default function PlanWorkspace() {
 
         {planType === 'response' && (function () {
           let tone = null;
+          const isRainfall = causeType === 'rainfall';
           if (!responseRules) {
             tone = {
               bg: '#fefce8', border: '#fde68a', color: '#92400e',
-              text: '⚠️ Response actions are only validated for River Overflow so far. This is a ' +
+              text: '⚠️ Response actions are only validated for River Overflow and Rainfall so far. This is a ' +
                 scenarioLabel(scenario) + ' simulation, which needs its own thresholds, so the actions are locked rather than checked against the wrong rules.',
+            };
+          } else if (isRainfall && rainfallLayersStatus === 'loading') {
+            tone = { bg: '#eff6ff', border: '#bfdbfe', color: '#1e40af', text: '🔄 Loading the drainage-risk layer for this simulation…' };
+          } else if (isRainfall && rainfallLayersStatus === 'error') {
+            tone = {
+              bg: '#fef2f2', border: '#fecaca', color: '#b91c1c',
+              text: '❌ Could not load the drainage-risk layer — actions are locked, because without it nothing can be verified. Check the backend is running.',
+            };
+          } else if (isRainfall) {
+            tone = {
+              bg: '#f0fdf4', border: '#bbf7d0', color: '#166534',
+              text: '✅ Checking against the drainage-risk layer — forecast band ' + rainfallBandLabel(scenario) + '.',
             };
           } else if (floodGridStatus === 'loading') {
             tone = { bg: '#eff6ff', border: '#bfdbfe', color: '#1e40af', text: '🔄 Loading the water depths for this simulation…' };
@@ -5075,7 +7158,8 @@ export default function PlanWorkspace() {
           // against has not loaded. Better a disabled button than one
           // that accepts an unverified placement.
           const notBuilt = tool.implemented === false;
-          const locked = planType === 'response' && (notBuilt || !responseRules || floodGridStatus !== 'ready');
+          const dataReady = causeType === 'rainfall' ? rainfallLayersStatus === 'ready' : floodGridStatus === 'ready';
+          const locked = planType === 'response' && (notBuilt || !responseRules || !dataReady);
           return (
             <button
               key={tool.key}
@@ -5540,6 +7624,31 @@ export default function PlanWorkspace() {
           {planType === 'response' ? '🚨 Response plan' : '🛡️ Prevention plan'}
         </div>
 
+        {planType === 'response' && (currentMarkers.length > 0 || closedRoads.length > 0) && (
+          <div style={{ display: 'flex', gap: 6, marginBottom: 10 }}>
+            <button
+              onClick={handlePrintReport}
+              title="Opens a printable report — use your browser's Print dialog to save it as a PDF"
+              style={{
+                flex: 1, padding: '7px 6px', borderRadius: 9, border: '1px solid #cbd5e1',
+                background: '#0f172a', color: 'white', fontSize: 11, fontWeight: 700, cursor: 'pointer',
+              }}
+            >
+              🖨️ Print / Save PDF
+            </button>
+            <button
+              onClick={handleDownloadReportText}
+              title="Downloads a plain-text copy of the same report"
+              style={{
+                flex: 1, padding: '7px 6px', borderRadius: 9, border: '1px solid #cbd5e1',
+                background: '#f8fafc', color: '#334155', fontSize: 11, fontWeight: 700, cursor: 'pointer',
+              }}
+            >
+              ⬇️ Download .txt
+            </button>
+          </div>
+        )}
+
         {currentMarkers.length === 0 && currentEmbankments.length === 0 && currentNotes.length === 0 && closedRoads.length === 0 && (
           <div style={{ fontSize: 11.5, color: '#94a3b8' }}>
             Nothing added yet. Pick an action, then click the map.
@@ -5602,7 +7711,12 @@ export default function PlanWorkspace() {
           </div>
         )}
 
-        {planType === 'response' && RESPONSE_TOOLS.map(function (t) {
+        {planType === 'response' && (
+          causeType === 'rainfall' ? RAINFALL_RESPONSE_TOOLS
+          : causeType === 'drainage_failure' ? DRAINAGE_FAILURE_RESPONSE_TOOLS
+          : causeType === 'dam_release' ? DAM_RELEASE_RESPONSE_TOOLS
+          : RESPONSE_TOOLS
+        ).map(function (t) {
           const matching = currentMarkers.filter(function (m) { return m.type === t.key; });
           if (matching.length === 0) return null;
           return (
@@ -5621,18 +7735,14 @@ export default function PlanWorkspace() {
                 } else if (t.key === 'evacuationZone') {
                   lines.push(Math.round(info.radiusM) + 'm radius · ' + info.buildingCount + ' buildings');
                   lines.push(info.maxDepthM > 0 ? 'max depth ' + formatDepth(info.maxDepthM) + ' · ' + info.floodedPercent + '% flooded' : 'no flooding inside this zone');
-                } else if (t.key === 'reliefCamp') {
+                } else if (t.key === 'reliefMedicalPost') {
                   lines.push(info.snappedFacilityName
                     ? 'at ' + info.snappedFacilityName + ' (' + amenityLabel(info.snappedFacilityAmenity) + ')'
                     : 'on open ground');
-                  if (m.params && m.params.capacity) lines.push('capacity ' + m.params.capacity + ' people');
-                  lines.push(floodClearanceText(info.nearestFloodM));
-                } else if (t.key === 'medicalPost') {
-                  if (m.params && m.params.postType) {
-                    const opt = t.formFields[0].options.find(function (o) { return o.value === m.params.postType; });
-                    lines.push(opt ? opt.label : m.params.postType);
-                  }
-                  if (m.params && m.params.capacity) lines.push('capacity ' + m.params.capacity + ' patients');
+                  if (m.params && m.params.shelterCapacity) lines.push('shelter capacity ' + m.params.shelterCapacity + ' people');
+                  if (m.params && m.params.medicalCapacity) lines.push('medical capacity ' + m.params.medicalCapacity + ' patients');
+                  lines.push('evac zone ' + Math.round(info.nearestZoneM) + 'm away');
+                  lines.push('road access ' + Math.round(info.roadDistanceM) + 'm' + (info.roadName ? ' (' + info.roadName + ')' : ''));
                   lines.push(info.nearestHospitalM !== null && info.nearestHospitalM !== undefined
                     ? 'nearest hospital ' + (info.nearestHospitalM >= 1000
                         ? (info.nearestHospitalM / 1000).toFixed(1) + 'km'
@@ -5666,6 +7776,63 @@ export default function PlanWorkspace() {
                       ? 'road access ' + Math.round(info.roadDistanceM) + 'm'
                       : '⚠ no road within ' + Math.round(info.roadDistanceM) + 'm');
                   lines.push(floodClearanceText(info.nearestFloodM));
+                } else if (t.key === 'rainWarning') {
+                  lines.push(Math.round(info.radiusM) + 'm coverage · ' + info.buildingCount + ' buildings');
+                  lines.push('≈ ' + info.estimatedPeople + ' people (rough estimate)');
+                  if (info.snappedFacilityName) lines.push('at ' + info.snappedFacilityName);
+                } else if (t.key === 'rainEvacZone') {
+                  lines.push(Math.round(info.radiusM) + 'm radius · ' + info.buildingCount + ' buildings · ' + info.lowPointCount + ' low points');
+                  lines.push(info.maxRiskClass ? info.maxRiskClass.toUpperCase() + ' drainage risk inside' : 'no risk zone overlap');
+                } else if (t.key === 'rainRoadClosure') {
+                  lines.push((info.lowPointKind === 'underpass' ? 'underpass' : 'road sag') + ', drop ' + info.dropM + 'm');
+                  lines.push(info.hasAlternate ? 'alternate route available' : '⚠ no alternate route found nearby');
+                } else if (t.key === 'rainWaterRescue') {
+                  lines.push(info.zoneClass.toUpperCase() + ' risk zone, pools up to ' + info.zoneMaxSinkM + 'm');
+                  if (m.params && m.params.teamsAvailable) lines.push(m.params.teamsAvailable + ' team' + (m.params.teamsAvailable > 1 ? 's' : ''));
+                } else if (t.key === 'rainMedicalPost') {
+                  if (m.params && m.params.postType) {
+                    const opt = t.formFields[0].options.find(function (o) { return o.value === m.params.postType; });
+                    lines.push(opt ? opt.label : m.params.postType);
+                  }
+                  lines.push('evac zone ' + Math.round(info.nearestZoneM) + 'm away');
+                  lines.push('road access ' + Math.round(info.roadDistanceM) + 'm' + (info.roadName ? ' (' + info.roadName + ')' : ''));
+                } else if (t.key === 'rainReliefCamp') {
+                  lines.push(info.snappedFacilityName
+                    ? 'at ' + info.snappedFacilityName + ' (' + amenityLabel(info.snappedFacilityAmenity) + ')'
+                    : 'on open ground');
+                  if (m.params && m.params.capacity) lines.push('capacity ' + m.params.capacity + ' people');
+                  lines.push('evac zone ' + Math.round(info.nearestZoneM) + 'm away');
+                } else if (t.key === 'drainBlockageClearance') {
+                  lines.push((info.roadName || amenityLabel(info.roadHighwayType)) + ' — ' + String(info.highwayClass).toUpperCase() + ' capacity culvert');
+                  lines.push(formatDepth(info.depthM) + ' backing up — flow mismatch');
+                } else if (t.key === 'drainPumpDeployment') {
+                  lines.push((info.lowPointKind === 'underpass' ? 'underpass' : 'road sag') + ', historic drop ' + info.dropM + 'm');
+                  if (info.currentDepthM > 0) lines.push('currently ' + formatDepth(info.currentDepthM));
+                  if (m.params && m.params.pumpsAvailable) lines.push(m.params.pumpsAvailable + ' pump' + (m.params.pumpsAvailable > 1 ? 's' : ''));
+                } else if (t.key === 'drainSewerOverflow') {
+                  lines.push('☢️ CONTAMINATION RISK — not a normal flood hazard');
+                  lines.push(info.junctionDegree + '-way junction, ' + formatDepth(info.depthM) + ' surfacing');
+                } else if (t.key === 'drainVectorControl') {
+                  lines.push(formatDepth(info.depthM) + ' standing water');
+                  if (m.params && m.params.durationHr) lines.push(m.params.durationHr + 'h standing (' + (m.params.durationHr / 24).toFixed(1) + ' days) — larvicide/spraying crew');
+                } else if (t.key === 'drainBypass') {
+                  lines.push(formatDepth(info.originDepthM) + ' at origin → ' + formatDepth(info.destDepthM) + ' at bypass target');
+                  lines.push(Math.round(info.distanceM) + 'm bypass path');
+                } else if (t.key === 'damWarningPoint') {
+                  lines.push(info.distanceFromDamKm.toFixed(1) + 'km from Rawal Dam · ' + formatCountdown(info.arrivalMinutes));
+                  lines.push(info.dischargeCusecs.toLocaleString() + ' cusecs');
+                  if (info.snappedFacilityName) lines.push('at ' + info.snappedFacilityName);
+                } else if (t.key === 'damEvacZone') {
+                  lines.push(tierLabel(info.tier) + ' · ' + formatCountdown(info.arrivalMinutes) + ' until the water arrives');
+                  lines.push(info.distanceFromDamKm.toFixed(1) + 'km from Rawal Dam');
+                } else if (t.key === 'damCrossingClosure') {
+                  lines.push('⚠️ current/velocity hazard — ' + formatCountdown(info.arrivalMinutes));
+                  lines.push(info.distanceFromDamKm.toFixed(1) + 'km from Rawal Dam');
+                } else if (t.key === 'damRallyPoint') {
+                  lines.push(Math.round(info.walkMinutes) + 'min walk from the nullah · wave in ' + formatCountdown(info.arrivalMinutes));
+                  lines.push(Math.round(info.arrivalMinutes - info.walkMinutes) + 'min safety margin');
+                } else if (t.key === 'damReleaseTracking') {
+                  if (m.params && m.params.dischargeCusecs) lines.push(Number(m.params.dischargeCusecs).toLocaleString() + ' cusecs logged');
                 }
 
                 return (

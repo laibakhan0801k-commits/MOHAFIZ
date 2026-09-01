@@ -125,6 +125,8 @@ export default function FloodMap() {
     studyArea: true,
     floodOverlay: true,
     cutRoads: true,
+    drainageRisk: true,
+    lowPoints: true,
   });
 
   const [causeType, setCauseType] = useState('rainfall');
@@ -259,6 +261,119 @@ export default function FloodMap() {
             ],
             'fill-extrusion-opacity': 0.4,
           },
+        });
+
+        // ---------------------------------------------------------------
+        // RAINFALL drainage-risk layer. Terrain-derived pockets where
+        // water pools when urban drainage is overwhelmed -- independent
+        // of the nullah, which is the whole point: pluvial flooding is
+        // not fluvial flooding. Built by
+        // Backend/scripts/build_drainage_risk.py.
+        // ---------------------------------------------------------------
+        setStatus('loading drainage risk...');
+        const risk = await (await fetch('/data/drainage_risk.geojson')).json();
+        mapRef.current.addSource('drainage-risk', { type: 'geojson', data: risk });
+        mapRef.current.addLayer({
+          id: 'drainage-risk-fill',
+          type: 'fill',
+          source: 'drainage-risk',
+          paint: {
+            'fill-color': [
+              'match', ['get', 'risk_class'],
+              'severe', '#b91c1c',
+              'high', '#ea580c',
+              'moderate', '#f59e0b',
+              '#f59e0b',
+            ],
+            'fill-opacity': 0.45,
+          },
+        });
+        mapRef.current.addLayer({
+          id: 'drainage-risk-outline',
+          type: 'line',
+          source: 'drainage-risk',
+          paint: {
+            'line-color': [
+              'match', ['get', 'risk_class'],
+              'severe', '#7f1d1d',
+              'high', '#9a3412',
+              'moderate', '#92400e',
+              '#92400e',
+            ],
+            'line-width': 1.2,
+          },
+        });
+
+        mapRef.current.on('click', 'drainage-risk-fill', (e) => {
+          const p = e.features[0].properties;
+          new maplibregl.Popup()
+            .setLngLat(e.lngLat)
+            .setHTML(
+              `<div style="font-family:system-ui;font-size:12px;min-width:190px">
+                 <strong>Drainage-risk zone #${p.zone_id}</strong><br/>
+                 <span style="color:#b91c1c;font-weight:700;text-transform:uppercase">${p.risk_class}</span><br/>
+                 <div style="margin-top:5px;color:#334155">
+                   pools up to <b>${p.max_sink_m}m</b> deep (mean ${p.mean_sink_m}m)<br/>
+                   area <b>${(p.area_m2 / 10000).toFixed(2)} ha</b> · ${p.cells} cells<br/>
+                   nearest drain <b>${p.min_dist_to_drain_m}m</b><br/>
+                   built cover ${(p.impervious_frac * 100).toFixed(0)}%
+                 </div>
+               </div>`
+            )
+            .addTo(mapRef.current);
+        });
+        mapRef.current.on('mouseenter', 'drainage-risk-fill', () => {
+          mapRef.current.getCanvas().style.cursor = 'pointer';
+        });
+        mapRef.current.on('mouseleave', 'drainage-risk-fill', () => {
+          mapRef.current.getCanvas().style.cursor = '';
+        });
+
+        setStatus('loading road low points...');
+        const lowPts = await (await fetch('/data/road_low_points.geojson')).json();
+        mapRef.current.addSource('road-low-points', { type: 'geojson', data: lowPts });
+        // Ordinary terrain sags: real dips, but not grade-separated.
+        mapRef.current.addLayer({
+          id: 'road-low-points-sag',
+          type: 'circle',
+          source: 'road-low-points',
+          filter: ['==', ['get', 'kind'], 'sag'],
+          paint: {
+            'circle-radius': ['interpolate', ['linear'], ['zoom'], 12, 2.5, 18, 5],
+            'circle-color': '#0891b2',
+            'circle-opacity': 0.55,
+          },
+        });
+        // Underpasses: a road crosses without sharing a junction node.
+        // These are the ones that drown vehicles.
+        mapRef.current.addLayer({
+          id: 'road-low-points-underpass',
+          type: 'circle',
+          source: 'road-low-points',
+          filter: ['==', ['get', 'kind'], 'underpass'],
+          paint: {
+            'circle-radius': ['interpolate', ['linear'], ['zoom'], 12, 5, 18, 11],
+            'circle-color': '#1d4ed8',
+            'circle-stroke-width': 2.5,
+            'circle-stroke-color': '#ffffff',
+          },
+        });
+
+        mapRef.current.on('click', 'road-low-points-underpass', (e) => {
+          const p = e.features[0].properties;
+          new maplibregl.Popup()
+            .setLngLat(e.lngLat)
+            .setHTML(
+              `<div style="font-family:system-ui;font-size:12px">
+                 <strong>Underpass / sag</strong><br/>
+                 <span style="color:#64748b">${p.name || 'unnamed'} · ${p.highway}</span><br/>
+                 <div style="margin-top:4px;color:#334155">
+                   road dips <b>${p.drop_m}m</b> below both approaches<br/>
+                   terrain sink here: <b>${p.sink_depth_m}m</b>
+                 </div>
+               </div>`
+            )
+            .addTo(mapRef.current);
         });
 
         setStatus('loading facilities...');
@@ -452,6 +567,21 @@ export default function FloodMap() {
     applyFinalRoads(data);
   }
 
+  // Rainfall severity is still validated on the backend as a PMD/FFD
+  // 24-hour accumulation BAND (see flood_engine.rainfall_band_severity),
+  // not a live intensity feed -- that discrete-band model is what the
+  // Response Plan's rainfall actions gate on. The intensity + duration
+  // sliders are the familiar input; their total is bucketed into the
+  // same five PMD bands right here before the request is sent, so
+  // nothing downstream changes.
+  function rainfallTotalToBand(totalMm) {
+    if (totalMm <= 10) return 'light';
+    if (totalMm <= 30) return 'moderate';
+    if (totalMm <= 70) return 'heavy';
+    if (totalMm <= 150) return 'very_heavy';
+    return 'extremely_heavy';
+  }
+
   async function runFloodScenario() {
     if (!user?.id) {
       setFloodError('You must be logged in to run a simulation.');
@@ -471,9 +601,13 @@ export default function FloodMap() {
           }
         });
       }
-      const sentParams = causeType === 'drainage_failure'
-        ? { ...clampedParams, drainage_capacity_pct: 100 - clampedParams.drainage_capacity_pct }
-        : clampedParams;
+      let sentParams = clampedParams;
+      if (causeType === 'drainage_failure') {
+        sentParams = { ...clampedParams, drainage_capacity_pct: 100 - clampedParams.drainage_capacity_pct };
+      } else if (causeType === 'rainfall') {
+        const totalMm = clampedParams.intensity_mm_per_hr * clampedParams.duration_hr;
+        sentParams = { band: rainfallTotalToBand(totalMm) };
+      }
       const res = await fetch(`${API_URL}/flood`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -541,6 +675,12 @@ export default function FloodMap() {
       setVis('flood-overlay-layer', next);
     } else if (key === 'cutRoads') {
       setVis('flood-cut-roads-layer', next);
+    } else if (key === 'drainageRisk') {
+      setVis('drainage-risk-fill', next);
+      setVis('drainage-risk-outline', next);
+    } else if (key === 'lowPoints') {
+      setVis('road-low-points-sag', next);
+      setVis('road-low-points-underpass', next);
     }
   }
 
@@ -565,7 +705,12 @@ export default function FloodMap() {
   }
 
   const LAYER_LIST = [
-    { key: 'studyArea', label: 'Study area boundary', color: STUDY_COLOR },
+    // Named "modeled area", not "study area": outside this rectangle no
+    // terrain data exists, so the absence of a risk zone there says
+    // nothing at all. Users need to see that edge.
+    { key: 'studyArea', label: 'Modeled area (terrain)', color: STUDY_COLOR },
+    { key: 'drainageRisk', label: 'Drainage-risk zones', color: '#ea580c' },
+    { key: 'lowPoints', label: 'Underpasses / road sags', color: '#1d4ed8' },
     { key: 'hospitals', label: 'Hospitals (42)', color: '#dc2626' },
     { key: 'shelters', label: 'Schools / shelters', color: '#facc15' },
     { key: 'water', label: 'Nullah Leh + water', color: '#0284c7' },
@@ -868,7 +1013,9 @@ export default function FloodMap() {
               <div style={{ fontSize: '20px', fontWeight: 800, color: '#ca8a04' }}>
                 {floodResult.severity}
               </div>
-              <div style={{ fontSize: '10px', color: '#64748b', fontWeight: 600 }}>rainfall intensity</div>
+              <div style={{ fontSize: '10px', color: '#64748b', fontWeight: 600 }}>
+                {floodResult.rainfall_band ? floodResult.rainfall_band.label + ' (' + floodResult.rainfall_band.plan_mm + 'mm planned)' : 'severity'}
+              </div>
             </div>
           </div>
         )}
