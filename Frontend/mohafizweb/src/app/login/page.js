@@ -2,14 +2,14 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { Space_Grotesk } from "next/font/google";
-
-const display = Space_Grotesk({
-  subsets: ["latin"],
-  weight: ["500", "700"],
-});
+import Logo from "@/components/Logo";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
+
+// Real bounds of the H-8/H-9 study area this app actually models (same
+// box HeroFloodPreview.js uses for its overlay) — not placeholder
+// coordinates.
+const BBOX = { north: 33.7351, south: 33.6701, east: 73.0849, west: 73.0099 };
 
 export default function LoginPage() {
   const router = useRouter();
@@ -67,57 +67,60 @@ export default function LoginPage() {
   }
 
   return (
-    <div className="flex min-h-screen w-full bg-[#080D18] text-[#E7EEF7]">
-      <div className="relative hidden w-1/2 overflow-hidden bg-gradient-to-br from-[#0B1220] to-[#0F1E30] md:flex md:flex-col md:justify-between md:p-12">
+    <div className="flex min-h-screen w-full bg-ink text-paper">
+      <div className="relative hidden w-1/2 overflow-hidden bg-ink md:flex md:flex-col md:justify-between md:p-12">
         <svg
-          className="pointer-events-none absolute inset-0 h-full w-full opacity-[0.18]"
+          className="pointer-events-none absolute inset-0 h-full w-full opacity-25"
           viewBox="0 0 800 900"
           preserveAspectRatio="none"
           aria-hidden="true"
         >
-          <path d="M-20,140 C120,90 260,190 400,150 C540,110 660,200 820,150" stroke="#2DD4BF" strokeWidth="1" fill="none" />
-          <path d="M-20,230 C140,180 260,270 420,230 C560,195 680,270 820,230" stroke="#2DD4BF" strokeWidth="1" fill="none" opacity="0.8" />
-          <path d="M-20,330 C130,290 280,360 420,320 C560,280 700,350 820,320" stroke="#2DD4BF" strokeWidth="1" fill="none" opacity="0.6" />
-          <path d="M-20,430 C150,400 260,460 420,430 C580,400 680,460 820,430" stroke="#2DD4BF" strokeWidth="1" fill="none" opacity="0.5" />
-          <path d="M-20,540 C140,510 280,570 420,540 C560,510 690,570 820,540" stroke="#F5A623" strokeWidth="1" fill="none" opacity="0.35" />
-          <path d="M-20,650 C150,620 280,680 420,650 C570,620 690,680 820,650" stroke="#F5A623" strokeWidth="1" fill="none" opacity="0.25" />
+          <path d="M-20,140 C120,90 260,190 400,150 C540,110 660,200 820,150" className="stroke-flow" strokeWidth="1" fill="none" />
+          <path d="M-20,230 C140,180 260,270 420,230 C560,195 680,270 820,230" className="stroke-flow" strokeWidth="1" fill="none" opacity="0.7" />
+          <path d="M-20,330 C130,290 280,360 420,320 C560,280 700,350 820,320" className="stroke-line" strokeWidth="1" fill="none" opacity="0.6" />
+          <path d="M-20,430 C150,400 260,460 420,430 C580,400 680,460 820,430" className="stroke-line" strokeWidth="1" fill="none" opacity="0.5" />
+          <path d="M-20,540 C140,510 280,570 420,540 C560,510 690,570 820,540" className="stroke-flow" strokeWidth="1" fill="none" opacity="0.3" />
+          <path d="M-20,650 C150,620 280,680 420,650 C570,620 690,680 820,650" className="stroke-line" strokeWidth="1" fill="none" opacity="0.25" />
         </svg>
 
-        <div className="relative z-10">
-          <h1 className={display.className + " text-3xl font-bold tracking-tight text-[#E7EEF7]"}>
+        <div className="relative z-10 flex-1 flex flex-col justify-center py-10">
+          <h1 className="font-display text-5xl lg:text-6xl font-bold tracking-tight text-paper">
             MOHAFIZ
           </h1>
-          <p className="mt-3 max-w-sm text-sm leading-6 text-[#7C8BA3]">
+          <p className="mt-2 font-display text-sm font-semibold uppercase tracking-wide text-flow">
+            Pakistan&rsquo;s What IF Engine
+          </p>
+          <p className="mt-4 max-w-sm font-body text-base leading-relaxed text-mint">
             Flood response digital twin for the Nullah Leh / Korang Nullah
             corridor — Saidpur to Blue Area, Islamabad.
           </p>
         </div>
 
-        <div className="relative z-10 font-mono text-xs text-[#4C6079]">
-          <div className="mb-1 text-[#7C8BA3]">BOUNDING BOX</div>
-          <div>N 33.7350° &nbsp; S 33.6700°</div>
-          <div>E 73.0850° &nbsp; W 73.0100°</div>
+        <div className="relative z-10 font-mono text-xs text-mint/70">
+          <div className="mb-1 text-mint/50">BOUNDING BOX</div>
+          <div>N {BBOX.north.toFixed(4)}&deg; &nbsp; S {BBOX.south.toFixed(4)}&deg;</div>
+          <div>E {BBOX.east.toFixed(4)}&deg; &nbsp; W {BBOX.west.toFixed(4)}&deg;</div>
         </div>
       </div>
 
-      <div className="flex w-full flex-col items-center justify-center px-6 py-16 md:w-1/2">
+      <div className="flex w-full flex-col items-center justify-center px-6 py-16 md:w-1/2 bg-surface-2">
         <div className="w-full max-w-sm">
-          <div className={display.className + " mb-1 text-xl font-medium md:hidden"}>
-            MOHAFIZ
+          <div className="mb-8 md:hidden">
+            <Logo />
           </div>
 
-          <div className="mb-8 flex gap-1 rounded-lg border border-white/[.08] bg-white/[.02] p-1">
+          <div className="mb-8 flex gap-1 rounded-lg border border-line bg-ink/30 p-1">
             <button
               type="button"
               onClick={function () { setMode("login"); setStatus("idle"); setMessage(""); }}
-              className={"flex-1 rounded-md py-2 text-sm font-medium transition-colors " + (mode === "login" ? "bg-[#2DD4BF] text-[#06231F]" : "text-[#7C8BA3] hover:text-[#E7EEF7]")}
+              className={"flex-1 rounded-md py-2 font-body text-sm font-medium transition-colors " + (mode === "login" ? "bg-flow text-ink" : "text-mint hover:text-paper")}
             >
               Log in
             </button>
             <button
               type="button"
               onClick={function () { setMode("signup"); setStatus("idle"); setMessage(""); }}
-              className={"flex-1 rounded-md py-2 text-sm font-medium transition-colors " + (mode === "signup" ? "bg-[#2DD4BF] text-[#06231F]" : "text-[#7C8BA3] hover:text-[#E7EEF7]")}
+              className={"flex-1 rounded-md py-2 font-body text-sm font-medium transition-colors " + (mode === "signup" ? "bg-flow text-ink" : "text-mint hover:text-paper")}
             >
               Sign up
             </button>
@@ -125,7 +128,7 @@ export default function LoginPage() {
 
           <form onSubmit={handleSubmit} className="space-y-4">
             <div>
-              <label htmlFor="email" className="mb-1.5 block text-xs font-medium text-[#7C8BA3]">
+              <label htmlFor="email" className="mb-1.5 block font-body text-xs font-medium text-mint">
                 Email
               </label>
               <input
@@ -135,13 +138,13 @@ export default function LoginPage() {
                 autoComplete="email"
                 value={email}
                 onChange={function (e) { setEmail(e.target.value); }}
-                className="w-full rounded-lg border border-white/[.08] bg-white/[.03] px-3.5 py-2.5 text-sm text-[#E7EEF7] outline-none placeholder:text-[#4C6079] focus:border-[#2DD4BF]/50 focus:ring-2 focus:ring-[#2DD4BF]/20"
+                className="w-full rounded-lg border border-line bg-ink/30 px-3.5 py-2.5 font-body text-sm text-paper outline-none placeholder:text-mint/40 focus:border-flow focus:ring-2 focus:ring-flow/20"
                 placeholder="you@example.com"
               />
             </div>
 
             <div>
-              <label htmlFor="password" className="mb-1.5 block text-xs font-medium text-[#7C8BA3]">
+              <label htmlFor="password" className="mb-1.5 block font-body text-xs font-medium text-mint">
                 Password
               </label>
               <input
@@ -152,7 +155,7 @@ export default function LoginPage() {
                 autoComplete={mode === "login" ? "current-password" : "new-password"}
                 value={password}
                 onChange={function (e) { setPassword(e.target.value); }}
-                className="w-full rounded-lg border border-white/[.08] bg-white/[.03] px-3.5 py-2.5 text-sm text-[#E7EEF7] outline-none placeholder:text-[#4C6079] focus:border-[#2DD4BF]/50 focus:ring-2 focus:ring-[#2DD4BF]/20"
+                className="w-full rounded-lg border border-line bg-ink/30 px-3.5 py-2.5 font-body text-sm text-paper outline-none placeholder:text-mint/40 focus:border-flow focus:ring-2 focus:ring-flow/20"
                 placeholder="••••••••"
               />
             </div>
@@ -160,22 +163,22 @@ export default function LoginPage() {
             <button
               type="submit"
               disabled={status === "loading"}
-              className="w-full rounded-lg bg-[#2DD4BF] py-2.5 text-sm font-semibold text-[#06231F] transition-opacity hover:opacity-90 disabled:opacity-50"
+              className="w-full rounded-lg bg-flow py-2.5 font-body text-sm font-semibold text-ink transition-opacity hover:opacity-90 disabled:opacity-50"
             >
-              {status === "loading" ? "Working..." : mode === "login" ? "Log in" : "Create account"}
+              {status === "loading" ? "Working..." : mode === "login" ? "Log In" : "Create account"}
             </button>
           </form>
 
           {message && (
             <div
-              className={"mt-4 rounded-lg border px-3.5 py-2.5 text-sm " + (status === "error" ? "border-[#FB7185]/30 bg-[#FB7185]/10 text-[#FB7185]" : "border-[#2DD4BF]/30 bg-[#2DD4BF]/10 text-[#2DD4BF]")}
+              className={"mt-4 rounded-lg border px-3.5 py-2.5 font-body text-sm " + (status === "error" ? "border-alert/30 bg-alert/10 text-alert" : "border-flow/30 bg-flow/10 text-flow")}
             >
               {message}
             </div>
           )}
 
           {token && (
-            <div className="mt-3 rounded-lg border border-white/[.08] bg-white/[.02] px-3.5 py-2.5 font-mono text-xs text-[#7C8BA3]">
+            <div className="mt-3 rounded-lg border border-line bg-ink/30 px-3.5 py-2.5 font-mono text-xs text-mint">
               token: {token.slice(0, 24)}...
             </div>
           )}

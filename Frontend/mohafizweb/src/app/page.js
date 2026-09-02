@@ -13,18 +13,22 @@ const SCENARIOS = [
   {
     name: "River Overflow",
     line: "Models the nullah breaching its banks, using real elevation data.",
+    image: "https://images.unsplash.com/photo-1783103957862-06b844e495f2?w=600&q=80&auto=format&fit=crop",
   },
   {
     name: "Rainfall",
     line: "Flash flooding when monsoon rain outpaces urban drainage.",
+    image: "https://images.unsplash.com/photo-1759299983355-6ddc9a9d8ba5?w=600&q=80&auto=format&fit=crop",
   },
   {
     name: "Drainage Failure",
     line: "Blocked drains and encroached nullahs — the most common local cause.",
+    image: "https://images.unsplash.com/photo-1745265797120-7c9718c72659?w=600&q=80&auto=format&fit=crop",
   },
   {
     name: "Dam Release",
     line: "Rawal Dam's spillway releases into Korang Nullah, with real advance warning.",
+    image: "https://images.unsplash.com/photo-1639237046487-1a2892330b9c?w=600&q=80&auto=format&fit=crop",
   },
 ];
 
@@ -127,6 +131,39 @@ export default function Home() {
         </div>
       </section>
 
+      {/* Scenarios — 4 cards, dark palette, lime on hover */}
+      <section className="bg-ink px-6 py-16">
+        <div className="max-w-6xl mx-auto">
+          <h2 className="font-display text-2xl text-paper mb-6">Scenarios Mohafiz models</h2>
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+            {SCENARIOS.map(function (s) {
+              return (
+                <div
+                  key={s.name}
+                  className="mh-card mh-fade-in group overflow-hidden border-2 border-mint/30 hover:border-flow rounded-xl bg-surface"
+                >
+                  <div className="relative h-32 overflow-hidden">
+                    <img
+                      src={s.image}
+                      alt=""
+                      className="w-full h-full object-cover transition-transform duration-500 ease-out group-hover:scale-110"
+                    />
+                    <div className="absolute inset-0 bg-gradient-to-t from-surface via-surface/10 to-transparent" />
+                  </div>
+                  <div className="px-5 py-4">
+                    <div className="flex items-center gap-2">
+                      <span className="w-3 h-3 rounded-full bg-line group-hover:bg-flow transition-colors" />
+                      <h3 className="font-display text-lg text-paper">{s.name}</h3>
+                    </div>
+                    <p className="font-body text-sm text-mint mt-2">{s.line}</p>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      </section>
+
       {/* Flood context — real, sourced numbers only */}
       <section className="bg-ink px-6 py-20">
         <div className="max-w-4xl mx-auto mh-card mh-fade-in border-t-2 border-alert bg-surface rounded-2xl px-8 py-12">
@@ -179,44 +216,6 @@ export default function Home() {
           <Link href="/how-it-works" className="inline-block mt-6 font-body text-sm text-flow underline">
             Read the full walkthrough
           </Link>
-        </div>
-      </section>
-
-      {/* Why this matters */}
-      <section className="bg-ink px-6 py-16">
-        <div className="max-w-2xl mx-auto mh-card mh-fade-in bg-surface rounded-xl px-6 py-8">
-          <p className="font-body text-base leading-relaxed text-mint">
-            Islamabad and Rawalpindi flood for different reasons — a river
-            overflowing its banks, monsoon rain that outpaces the drains,
-            storm drains blocked by encroachment and garbage, even scheduled
-            releases from Rawal Dam into Korang Nullah. Mohafiz models all
-            four, using real elevation data, the actual road network, and
-            Pakistan&rsquo;s own PMD flood thresholds — not a generic
-            simulation.
-          </p>
-        </div>
-      </section>
-
-      {/* Scenarios — 4 cards, dark palette, lime on hover */}
-      <section className="bg-ink px-6 py-16">
-        <div className="max-w-6xl mx-auto">
-          <h2 className="font-display text-2xl text-paper mb-6">Scenarios Mohafiz models</h2>
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-            {SCENARIOS.map(function (s) {
-              return (
-                <div
-                  key={s.name}
-                  className="mh-card mh-fade-in group border-2 border-line hover:border-flow rounded-xl bg-surface px-5 py-4"
-                >
-                  <div className="flex items-center gap-2">
-                    <span className="w-3 h-3 rounded-full bg-line group-hover:bg-flow transition-colors" />
-                    <h3 className="font-display text-lg text-paper">{s.name}</h3>
-                  </div>
-                  <p className="font-body text-sm text-mint mt-2">{s.line}</p>
-                </div>
-              );
-            })}
-          </div>
         </div>
       </section>
 
