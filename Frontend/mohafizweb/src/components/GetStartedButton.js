@@ -10,7 +10,14 @@ export default function GetStartedButton({ label = "Get Started", variant = "lim
     router.push(loggedIn ? "/map" : "/login");
   }
 
-  const colors = variant === "dark" ? "bg-ink text-paper" : "bg-lime text-ink";
+  // "dark" used to mean a dark button on the old light page — now that
+  // ink is the page background everywhere, that would be invisible, so
+  // it's a bordered surface-toned secondary button instead. "lime" (the
+  // default) stays the one high-contrast primary-CTA treatment.
+  const colors =
+    variant === "dark"
+      ? "bg-surface text-paper border border-line hover:border-flow"
+      : "bg-flow text-ink";
 
   return (
     <button

@@ -31,22 +31,22 @@ const SECTIONS = [
 
 export default function AboutPage() {
   return (
-    <div className="bg-paper">
+    <div className="bg-ink">
       <SiteNav />
 
-      <section className="bg-paper px-6 py-16">
+      <section className="bg-ink px-6 py-16">
         <div className="max-w-2xl mx-auto">
-          <h1 className="font-display text-4xl font-medium text-ink mb-10">About Mohafiz</h1>
+          <h1 className="font-display text-4xl font-medium text-paper mb-10">About Mohafiz</h1>
 
           <div className="space-y-6">
             {SECTIONS.map(function (s) {
               return (
                 <div
                   key={s.title}
-                  className={"mh-card mh-fade-in border-l-4 " + s.border + " bg-white/70 rounded-xl px-6 py-5"}
+                  className={"mh-card mh-fade-in border-l-4 " + s.border + " bg-surface rounded-xl px-6 py-5"}
                 >
-                  <h2 className="font-display text-lg text-ink">{s.title}</h2>
-                  <p className="font-body text-sm leading-relaxed text-ink/70 mt-2">{s.body}</p>
+                  <h2 className="font-display text-lg text-paper">{s.title}</h2>
+                  <p className="font-body text-sm leading-relaxed text-mint mt-2">{s.body}</p>
                 </div>
               );
             })}

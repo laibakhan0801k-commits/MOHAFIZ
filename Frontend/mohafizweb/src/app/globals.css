@@ -7,8 +7,12 @@
 @config "../../tailwind.config.js";
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  /* Dark-first by design now, not by system preference — matches the
+     ink/paper token flip in tailwind.config.js (ink = background,
+     paper = text) so a flash of the old light background never shows
+     before a page's own bg-ink wrapper paints. */
+  --background: #062D29;
+  --foreground: #F2F8F5;
 }
 
 @theme inline {
@@ -16,13 +20,6 @@
   --color-foreground: var(--foreground);
   --font-sans: var(--font-body);
   --font-mono: var(--font-mono-num);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
 }
 
 body {
@@ -72,13 +69,21 @@ body {
 }
 
 .mh-card {
-  box-shadow: 0 1px 2px rgba(18, 56, 50, 0.06), 0 8px 20px rgba(18, 56, 50, 0.08);
-  transition: transform 0.25s ease, box-shadow 0.25s ease;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25), 0 8px 20px rgba(0, 0, 0, 0.3);
+  transition: transform 0.25s ease, box-shadow 0.25s ease, border-color 0.25s ease;
 }
 
 .mh-card:hover {
   transform: translateY(-4px);
-  box-shadow: 0 4px 10px rgba(18, 56, 50, 0.1), 0 18px 32px rgba(18, 56, 50, 0.16);
+  box-shadow: 0 4px 10px rgba(0, 0, 0, 0.3), 0 18px 32px rgba(0, 0, 0, 0.4);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mh-card,
+  .mh-card:hover {
+    transform: none;
+    transition: none;
+  }
 }
 
 .mh-fade-in {
@@ -93,3 +98,16 @@ body {
 .mh-fade-in:nth-child(6) { animation-delay: 0.55s; }
 .mh-fade-in:nth-child(7) { animation-delay: 0.65s; }
 .mh-fade-in:nth-child(8) { animation-delay: 0.75s; }
+
+@media (prefers-reduced-motion: reduce) {
+  .contour-line {
+    animation: none;
+    stroke-dashoffset: 0;
+  }
+
+  .mh-fade-in {
+    animation: none;
+    opacity: 1;
+    transform: none;
+  }
+}

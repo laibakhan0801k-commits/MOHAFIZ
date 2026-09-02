@@ -23,7 +23,7 @@ export default function AuthNavLink() {
           setLoggedIn(false);
           router.push("/login");
         }}
-        className="bg-ink text-paper text-sm rounded-full px-4 py-1.5 hover:opacity-90 transition"
+        className="bg-flow text-ink text-sm rounded-full px-4 py-1.5 hover:opacity-90 transition"
       >
         Log out
       </button>

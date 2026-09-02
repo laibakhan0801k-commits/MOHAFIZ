@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { LogoMark } from "@/components/Logo";
 
 const FOOTER_LINKS = [
   { href: "/", label: "Home" },
@@ -14,9 +15,7 @@ export default function SiteFooter() {
         <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-6">
           <div>
             <div className="flex items-center gap-2">
-              <span className="w-6 h-6 rounded-md bg-lime flex items-center justify-center text-ink text-xs font-bold">
-                M
-              </span>
+              <LogoMark className="w-6 h-6" />
               <span className="font-display text-base font-medium">mohafiz</span>
             </div>
             <p className="font-body text-sm text-paper/60 mt-3 max-w-xs">

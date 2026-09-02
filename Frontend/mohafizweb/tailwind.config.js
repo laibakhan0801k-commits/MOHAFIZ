@@ -6,12 +6,21 @@ const config = {
   theme: {
     extend: {
       colors: {
-        ink: "#123832",
-        paper: "#DCEEE6",
-        flow: "#2F6F63",
-        alert: "#C1602E",
-        line: "#6B8D85",
-        lime: "#C6F135",
+        // Dark green + lime palette. ink is now the primary BACKGROUND
+        // (darkest), paper is now the primary TEXT color (near-white) —
+        // a full light-to-dark flip, not a hex swap under the same
+        // roles. surface/surface-2 step up in lightness for panels and
+        // their hover/elevated state; flow (lime) is the one accent
+        // color for CTAs and positive/safe states; alert (orange-red)
+        // is reserved for danger/hazard content only, never decorative.
+        ink: "#062D29",
+        surface: "#0A3D37",
+        "surface-2": "#0E4A43",
+        paper: "#F2F8F5",
+        mint: "#DCEFE9",
+        flow: "#C7FF28",
+        alert: "#FF5A36",
+        line: "#3E5C56",
       },
       fontFamily: {
         // Point at the CSS variables next/font/google generates in

@@ -27,13 +27,16 @@ function LoopDiagram() {
         const isPlanStep = node.label === "Plan";
         return (
           <g key={node.label}>
-            <rect x={node.x - 42} y="92" width="84" height="20" className="fill-paper" />
+            {/* "Eraser" rects blank out the connecting line behind each
+                label — must match the section's own dark background,
+                not the (now light) paper token. */}
+            <rect x={node.x - 42} y="92" width="84" height="20" className="fill-ink" />
             <circle cx={node.x} cy="60" r="26" className={isPlanStep ? "fill-line" : "fill-flow"} />
             <text
               x={node.x}
               y="67"
               textAnchor="middle"
-              className="fill-paper font-mono"
+              className={isPlanStep ? "fill-paper font-mono" : "fill-ink font-mono"}
               style={{ fontSize: 20 }}
             >
               {i + 1}
@@ -42,7 +45,7 @@ function LoopDiagram() {
               x={node.x}
               y="107"
               textAnchor="middle"
-              className="fill-ink font-display"
+              className="fill-paper font-display"
               style={{ fontSize: 15, fontWeight: 500 }}
             >
               {node.label}
@@ -50,13 +53,13 @@ function LoopDiagram() {
 
             {isPlanStep && (
               <g>
-                <rect x={node.x - 90} y="126" width="180" height="20" className="fill-paper" />
+                <rect x={node.x - 90} y="126" width="180" height="20" className="fill-ink" />
                 <rect x={node.x - 86} y="130" width="8" height="8" className="fill-flow" />
-                <text x={node.x - 74} y="138" className="fill-line font-body" style={{ fontSize: 11 }}>
+                <text x={node.x - 74} y="138" className="fill-mint font-body" style={{ fontSize: 11 }}>
                   Prevention
                 </text>
                 <rect x={node.x + 8} y="130" width="8" height="8" className="fill-alert" />
-                <text x={node.x + 20} y="138" className="fill-line font-body" style={{ fontSize: 11 }}>
+                <text x={node.x + 20} y="138" className="fill-mint font-body" style={{ fontSize: 11 }}>
                   Response
                 </text>
               </g>
@@ -109,48 +112,48 @@ const STEPS = [
 
 export default function HowItWorksPage() {
   return (
-    <div className="bg-paper">
+    <div className="bg-ink">
       <SiteNav />
 
-      <section className="bg-paper px-6 pt-16 pb-8">
+      <section className="bg-ink px-6 pt-16 pb-8">
         <div className="max-w-2xl mx-auto">
-          <h1 className="font-display text-4xl font-medium text-ink">How it Works</h1>
-          <p className="font-body text-sm text-ink/70 mt-3">
+          <h1 className="font-display text-4xl font-medium text-paper">How it Works</h1>
+          <p className="font-body text-sm text-mint mt-3">
             Mohafiz follows one loop: simulate, plan, implement, report,
             refine.
           </p>
         </div>
       </section>
 
-      <section className="bg-paper px-6 pb-16">
+      <section className="bg-ink px-6 pb-16">
         <LoopDiagram />
       </section>
 
-      <section className="bg-paper px-6 pb-16">
+      <section className="bg-ink px-6 pb-16">
         <div className="max-w-2xl mx-auto space-y-6">
           {STEPS.map(function (step) {
             return (
               <div
                 key={step.n}
-                className={"mh-card mh-fade-in border-l-4 " + step.border + " bg-white/70 rounded-xl px-6 py-5"}
+                className={"mh-card mh-fade-in border-l-4 " + step.border + " bg-surface rounded-xl px-6 py-5"}
               >
                 <div className="flex items-baseline gap-3">
                   <span className={"font-mono text-lg " + step.numColor}>{step.n}</span>
-                  <h2 className="font-display text-lg text-ink">{step.title}</h2>
+                  <h2 className="font-display text-lg text-paper">{step.title}</h2>
                 </div>
-                <p className="font-body text-sm leading-relaxed text-ink/70 mt-3">{step.body}</p>
+                <p className="font-body text-sm leading-relaxed text-mint mt-3">{step.body}</p>
 
                 {step.split && (
                   <div className="mt-5 flex flex-col sm:flex-row gap-3">
                     <div className="flex-1 rounded-lg bg-flow/10 border-l-4 border-flow px-4 py-3">
                       <div className="font-body text-xs font-semibold text-flow">Prevention</div>
-                      <p className="font-body text-xs leading-relaxed text-ink/70 mt-1">
+                      <p className="font-body text-xs leading-relaxed text-mint mt-1">
                         Before the flood — drains, embankments, floodproofing.
                       </p>
                     </div>
                     <div className="flex-1 rounded-lg bg-alert/10 border-l-4 border-alert px-4 py-3">
                       <div className="font-body text-xs font-semibold text-alert">Response</div>
-                      <p className="font-body text-xs leading-relaxed text-ink/70 mt-1">
+                      <p className="font-body text-xs leading-relaxed text-mint mt-1">
                         During the flood — evacuation, closures, medical posts.
                       </p>
                     </div>
