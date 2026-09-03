@@ -7,6 +7,8 @@ import 'maplibre-gl/dist/maplibre-gl.css';
 import * as turf from '@turf/turf';
 import { deriveImpact, formatFloodPctDelta } from '@/lib/impactFormat';
 import ResponseImpactModal from '@/components/ResponseImpactModal';
+import PreventionPlanPanel from '@/components/PreventionPlanPanel';
+import ResponseComparisonPanel from '@/components/ResponseComparisonPanel';
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8002';
 
@@ -732,6 +734,12 @@ const DAM_RELEASE_RESPONSE_TOOLS = [
   },
 ];
 
+// SYNC: prevention_constants.py ACTION_VALIDATION_CONFIG — every tool's
+// `validationConfig` object below has an identical entry there, keyed by
+// this array's `key`. If you change a validationConfig value here, update
+// it there too (and vice versa) — the AI Prevention Proposer's Python
+// validator (Backend/prevention_validation.py) must reject/accept exactly
+// what this file's validatePlacement() would.
 const PREVENTION_TOOLS = [
   {
     key: 'desilt',
@@ -925,7 +933,7 @@ const PREVENTION_TOOLS = [
 // This stops "desilt the nullah" from silently accepting a click on a
 // road or an empty field -- the click must land on a real channel.
 // ---------------------------------------------------------------------
-const WATERWAY_SNAP_MAX_M = 30; // real channel width (~3m) + click/zoom tolerance
+const WATERWAY_SNAP_MAX_M = 30; // real channel width (~3m) + click/zoom tolerance // SYNC: prevention_constants.py WATERWAY_SNAP_MAX_M
 
 function findNearestWaterwaySegment(lngLat, waterwaysGeoJSON, maxDistanceM) {
   if (!waterwaysGeoJSON || !waterwaysGeoJSON.features || waterwaysGeoJSON.features.length === 0) {
@@ -960,10 +968,10 @@ function findNearestWaterwaySegment(lngLat, waterwaysGeoJSON, maxDistanceM) {
 }
 
 // Embankment-specific constants (used by the full-line validation)
-const EMBANKMENT_MIN_DISTANCE_M = 5;
-const EMBANKMENT_MAX_DISTANCE_M = 50;
-const EMBANKMENT_ROAD_BUFFER_M = 15;
-const EMBANKMENT_SAMPLE_INTERVAL_M = 5;
+const EMBANKMENT_MIN_DISTANCE_M = 5; // SYNC: prevention_constants.py EMBANKMENT_MIN_DISTANCE_M
+const EMBANKMENT_MAX_DISTANCE_M = 50; // SYNC: prevention_constants.py EMBANKMENT_MAX_DISTANCE_M
+const EMBANKMENT_ROAD_BUFFER_M = 15; // SYNC: prevention_constants.py EMBANKMENT_ROAD_BUFFER_M
+const EMBANKMENT_SAMPLE_INTERVAL_M = 5; // SYNC: prevention_constants.py EMBANKMENT_SAMPLE_INTERVAL_M
 
 // ---------------------------------------------------------------------
 // Minimum distance from a point to any feature geometry.
@@ -1126,7 +1134,7 @@ function checkPointConstraints(point, waterwaysGeoJSON, buildingsGeoJSON, roadsG
     minWaterwayDistance: EMBANKMENT_MIN_DISTANCE_M,
     maxWaterwayDistance: EMBANKMENT_MAX_DISTANCE_M,
     roadClearance: EMBANKMENT_ROAD_BUFFER_M,
-    buildingClearance: 10,
+    buildingClearance: 10, // SYNC: prevention_constants.py EMBANKMENT_BUILDING_CLEARANCE_M
   };
   const geoData = { waterwaysGeoJSON, buildingsGeoJSON, roadsGeoJSON };
   const lngLat = { lng: point.geometry.coordinates[0], lat: point.geometry.coordinates[1] };
@@ -4998,6 +5006,35 @@ export default function PlanWorkspace() {
   const [breakdownLoading, setBreakdownLoading] = useState(false);
   const [showBreakdown, setShowBreakdown] = useState(false);
   const [responseImpactResult, setResponseImpactResult] = useState(null);
+  // AI Prevention Proposer (Backend /ai/prevention/suggest) -- result
+  // holds the real { hazard_summary, proposals, trace, simulation_stats }
+  // response, never a client-side fabrication. addedProposalKeys tracks
+  // which proposals the user has already clicked "Add to plan" for, so
+  // that button can't be double-clicked into adding the same action twice.
+  const [aiSuggestLoading, setAiSuggestLoading] = useState(false);
+  const [aiSuggestResult, setAiSuggestResult] = useState(null);
+  const [aiSuggestError, setAiSuggestError] = useState(null);
+  const [addedProposalKeys, setAddedProposalKeys] = useState({});
+  // Real combined before/after for the WHOLE AI-proposed plan, from a
+  // real /prevention/simulate call against all its proposals together --
+  // not a sum of each proposal's own individual real_impact (which
+  // wouldn't account for actions interacting on the same terrain).
+  const [aiCombinedImpact, setAiCombinedImpact] = useState(null);
+
+  // AI Response Comparison (Hazard Reader + Strategist + Impact
+  // Evaluator, Backend/main.py POST /ai/response/compare) -- mirrors
+  // the AI Prevention state block above exactly.
+  const [aiResponseLoading, setAiResponseLoading] = useState(false);
+  const [aiResponseResult, setAiResponseResult] = useState(null);
+  const [aiResponseError, setAiResponseError] = useState(null);
+  const [addedResponseProposalKeys, setAddedResponseProposalKeys] = useState({});
+
+  // HUD map-frame state -- mapBearing mirrors the map's real bearing (for
+  // the compass badge, updated from maplibre's own 'rotate' event, not
+  // invented); floodLayerVisible mirrors the real flood-overlay-layer's
+  // visibility, toggled through the HUD's "layers" control.
+  const [mapBearing, setMapBearing] = useState(0);
+  const [floodLayerVisible, setFloodLayerVisible] = useState(true);
 
   const activeToolRef = useRef(null);
   const planTypeRef = useRef('response');
@@ -5484,7 +5521,10 @@ export default function PlanWorkspace() {
       pitch: 45,
     });
 
-    mapRef.current.addControl(new maplibregl.NavigationControl({ visualizePitch: true }));
+    // Custom HUD controls (zoom/compass/layers) replace the default
+    // control widget so they can match the dashboard's dark/lime style --
+    // still driven by the same real maplibre methods/events underneath.
+    mapRef.current.on('rotate', function () { setMapBearing(mapRef.current.getBearing()); });
 
     mapRef.current.on('load', async () => {
       const map = mapRef.current;
@@ -7332,6 +7372,345 @@ export default function PlanWorkspace() {
     }
   }
 
+  // ---------------------------------------------------------------------
+  // AI Prevention Proposer -- calls the real backend endpoint
+  // (Backend/main.py POST /ai/prevention/suggest), which runs the real
+  // Hazard Analyst + Proposer against the SAME simulation data and the
+  // SAME validation rules every manually-placed action is checked
+  // against (Backend/prevention_validation.py, ported from this file's
+  // own validatePlacement). The AI never gets to assert something is
+  // true -- every field rendered below (real_impact, the trace log) is
+  // exactly what the backend computed, not client-side invention.
+  // ---------------------------------------------------------------------
+  async function runAiSuggest() {
+    setAiSuggestLoading(true);
+    setAiSuggestError(null);
+    setAiSuggestResult(null);
+    setAiCombinedImpact(null);
+    setAddedProposalKeys({});
+
+    var existingPlanActions = buildPreventionActions().map(function (a) {
+      return { lon: a.lon, lat: a.lat, type: a.type };
+    });
+
+    try {
+      var res = await fetch(API_URL + '/ai/prevention/suggest', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          cause_type: scenario.cause_type,
+          water_level_m: scenario.water_level_m,
+          existing_plan_actions: existingPlanActions,
+          max_proposals: 4,
+        }),
+      });
+      var data = await res.json();
+      if (!res.ok) throw new Error(data.detail || 'AI suggestion failed');
+      data.generatedAt = Date.now();
+      setAiSuggestResult(data);
+
+      // Real combined before/after for the WHOLE proposed plan -- the
+      // exact same /prevention/simulate endpoint "Apply Prevention"
+      // already calls, run against all accepted proposals together, so
+      // interaction effects between actions are captured for real
+      // instead of summing each proposal's own isolated real_impact.
+      if (data.proposals && data.proposals.length > 0) {
+        var aiActions = data.proposals.map(function (p, i) { return proposalToPreventionAction(-1000 - i, p); });
+        var scenarioParams = (scenario.params && scenario.params.params) ? scenario.params.params : {};
+        var causeType = (scenario.params && scenario.params.cause_type) ? scenario.params.cause_type : scenario.cause_type;
+        try {
+          var simRes = await fetch(API_URL + '/prevention/simulate', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              cause_type: causeType,
+              params: scenarioParams,
+              water_level_m: scenario.water_level_m,
+              actions: aiActions,
+            }),
+          });
+          var simData = await simRes.json();
+          if (simRes.ok) setAiCombinedImpact(simData);
+        } catch (simErr) {
+          console.error('AI combined-impact simulation failed:', simErr);
+        }
+      }
+    } catch (err) {
+      setAiSuggestError(err.message || 'Could not reach the AI Prevention Proposer — check the backend is running.');
+    } finally {
+      setAiSuggestLoading(false);
+    }
+  }
+
+  // Converts one AI proposal into the PreventionAction shape
+  // /prevention/simulate expects (Backend/main.py's _build_terrain_args),
+  // matching buildPreventionActions()'s own conversion. Only retentionPond
+  // needs a key remap: the proposer's real default params use "area_m2"
+  // (Backend/ai_proposer.py _default_parameters) but _build_terrain_args
+  // only recognizes "surface_area_m2" or "area".
+  function proposalToPreventionAction(uid, proposal) {
+    var action = {
+      uid: uid,
+      type: proposal.action_type,
+      lat: proposal.location.lat,
+      lon: proposal.location.lon,
+      params: Object.assign({}, proposal.parameters),
+    };
+    if (proposal.action_type === 'embankment') {
+      action.line_coords = proposal.real_impact && proposal.real_impact.line_coords;
+    }
+    if (proposal.action_type === 'retentionPond' && proposal.parameters) {
+      action.params.area = proposal.parameters.area_m2;
+    }
+    return action;
+  }
+
+  // Adds every accepted proposal that hasn't already been added to the
+  // real plan in one go (the spec's "Apply This Plan" button) -- reuses
+  // addAiProposalToPlan per-proposal so each one goes through the exact
+  // same real backend calls (embankment-compare) / real marker builder
+  // a single "Add to plan" click would.
+  function applyFullAiPlan() {
+    if (!aiSuggestResult || !aiSuggestResult.proposals) return;
+    aiSuggestResult.proposals.forEach(function (p) {
+      var key = p.action_type + '_' + p.location.lon.toFixed(6) + '_' + p.location.lat.toFixed(6);
+      if (!addedProposalKeys[key]) addAiProposalToPlan(p, key);
+    });
+  }
+
+  // ---------------------------------------------------------------------
+  // AI Response Comparison -- calls the real backend endpoint
+  // (Backend/main.py POST /ai/response/compare), which runs the real
+  // Hazard Reader + Strategist + Impact Evaluator against the SAME
+  // response-action validation rules a manual click faces
+  // (Backend/response_validation.py, ported from this file's own
+  // resolveWarningPoint/resolveEvacuationZone/resolveCloseFloodedRoad/
+  // resolveBoatLaunch/resolveReliefMedicalPost). Every proposal's
+  // validated_payload and real_coverage below is exactly what the
+  // backend computed -- never client-side invention.
+  // ---------------------------------------------------------------------
+  function buildExistingResponseActions() {
+    var actions = markers.filter(function (m) { return m.planType === 'response'; }).map(function (m) {
+      return { type: m.type, lat: m.lat, lon: m.lon, params: m.params || {} };
+    });
+    closedRoads.forEach(function (r) {
+      actions.push({ type: 'closeRoad', lat: r.lat, lon: r.lon, road_u: r.roadU, road_v: r.roadV });
+    });
+    return actions;
+  }
+
+  async function runAiResponseCompare() {
+    setAiResponseLoading(true);
+    setAiResponseError(null);
+    setAiResponseResult(null);
+    setAddedResponseProposalKeys({});
+
+    try {
+      var res = await fetch(API_URL + '/ai/response/compare', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          water_level_m: scenario.water_level_m,
+          existing_response_actions: buildExistingResponseActions(),
+          max_proposals: 4,
+        }),
+      });
+      var data = await res.json();
+      if (!res.ok) throw new Error(data.detail || 'AI response comparison failed');
+      data.generatedAt = Date.now();
+      setAiResponseResult(data);
+    } catch (err) {
+      setAiResponseError(err.message || 'Could not reach the AI Response Comparison — check the backend is running.');
+    } finally {
+      setAiResponseLoading(false);
+    }
+  }
+
+  // Turns one accepted AI response proposal into a REAL plan marker/
+  // closure, built straight from the backend's own validated_payload
+  // (already checked against the real placement rules -- no client-side
+  // re-validation or re-computation needed), mirroring submitResponseAction's
+  // own real record shapes exactly.
+  function addAiResponseProposalToPlan(proposal, proposalKey) {
+    var payload = proposal.validated_payload || {};
+
+    if (proposal.action_type === 'closeRoad') {
+      var roadUid = nextUid();
+      var closure = {
+        _uid: roadUid,
+        planType: 'response',
+        actionType: 'closeRoad',
+        roadIndex: null,
+        lat: payload.lat,
+        lon: payload.lon,
+        roadName: payload.road_name,
+        roadHighwayType: payload.road_highway_type,
+        roadU: payload.road_u,
+        roadV: payload.road_v,
+        depthM: payload.depth_m,
+        durationHr: null,
+        aiGenerated: true,
+      };
+      setClosedRoads(function (prev) { return prev.concat([closure]); });
+      setUndoStack(function (prev) { return prev.concat([{ type: 'closedRoad', uid: roadUid }]); });
+      playInterventionAnimation(mapRef.current, 'closeRoad', payload.lon, payload.lat);
+      setAddedResponseProposalKeys(function (prev) { var next = Object.assign({}, prev); next[proposalKey] = true; return next; });
+      return;
+    }
+
+    var toolDef = RESPONSE_TOOLS.find(function (t) { return t.key === proposal.action_type; });
+    if (!toolDef) return;
+    var marker = {
+      _uid: nextUid(),
+      planType: 'response',
+      type: proposal.action_type,
+      label: toolDef.label,
+      emoji: toolDef.emoji,
+      color: toolDef.color,
+      effect: toolDef.effect || {},
+      effectLabel: toolDef.effectLabel || null,
+      lat: payload.lat,
+      lon: payload.lon,
+      params: proposal.parameters,
+      aiGenerated: true,
+    };
+    if (payload.snapped_facility_name) marker.info = { 'Snapped to': payload.snapped_facility_name };
+    setMarkers(function (prev) { return prev.concat([marker]); });
+    setUndoStack(function (prev) { return prev.concat([{ type: 'marker', uid: marker._uid }]); });
+    playInterventionAnimation(mapRef.current, proposal.action_type, payload.lon, payload.lat);
+    setAddedResponseProposalKeys(function (prev) { var next = Object.assign({}, prev); next[proposalKey] = true; return next; });
+  }
+
+  function applyFullAiResponsePlan() {
+    if (!aiResponseResult || !aiResponseResult.proposals) return;
+    aiResponseResult.proposals.forEach(function (p) {
+      var key = p.action_type + '_' + p.location.lon.toFixed(6) + '_' + p.location.lat.toFixed(6);
+      if (!addedResponseProposalKeys[key]) addAiResponseProposalToPlan(p, key);
+    });
+  }
+
+  // Real defaults for the action-specific parameters the AI proposer
+  // doesn't set itself (Backend/ai_proposer.py's _default_parameters
+  // only fills embankment/retentionPond/widenChannel -- these four
+  // action types are more about WHERE than "how much", so the AI
+  // reasoning never needed to specify a value). Same defaults each
+  // tool's own formFields already use, so an AI-added marker is
+  // indistinguishable from a manually-placed one with default settings.
+  function defaultParamsForAiAction(actionType) {
+    if (actionType === 'desilt') return { length: 100, depthToRemove: 0.5 };
+    if (actionType === 'clearDrains') return { sectionLength: 30 };
+    if (actionType === 'warningGauge') return { warningLevelM: 2, alertType: 'siren' };
+    if (actionType === 'greenBuffer') return { bufferWidth: 10, vegetationType: 'native_trees' };
+    return {};
+  }
+
+  // Turns one accepted AI proposal into a REAL plan marker/embankment --
+  // never automatic, only ever called from the "Add to plan" button
+  // click, same rule as every other action this session. Mirrors
+  // submitPendingAction's own prevention-plan submit path exactly, so
+  // an AI-added action behaves identically to a manually-placed one
+  // (shows in the plan summary, counts toward Apply Prevention, etc.).
+  function addAiProposalToPlan(proposal, proposalKey) {
+    var toolDef = PREVENTION_TOOLS.find(function (t) { return t.key === proposal.action_type; });
+    if (!toolDef) return;
+
+    if (proposal.action_type === 'embankment') {
+      var lineCoords = proposal.real_impact && proposal.real_impact.line_coords;
+      if (!lineCoords) {
+        setToolError('This AI proposal is missing its wall geometry — cannot add it.');
+        setTimeout(function () { setToolError(null); }, 4000);
+        return;
+      }
+      var lengthM = Number((proposal.parameters && proposal.parameters.length_m) || 50);
+      var heightM = Number((proposal.parameters && proposal.parameters.height) || 1.5);
+      fetch(API_URL + '/embankment-compare', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ line_coords: lineCoords, height_m: heightM, water_level_m: scenario.water_level_m }),
+      })
+        .then(function (res) { return res.json(); })
+        .then(function (data) {
+          var embUid = nextUid();
+          var embRecord = {
+            _uid: embUid,
+            planType: 'prevention',
+            lengthM: lengthM,
+            heightM: heightM,
+            material: 'earthen',
+            lineCoords: lineCoords,
+            anchorLng: proposal.location.lon,
+            anchorLat: proposal.location.lat,
+            waterwayDistanceM: null,
+            before: data.before,
+            after: data.after,
+            difference: data.difference,
+            aiGenerated: true,
+          };
+          setEmbankments(function (prev) { return prev.concat([embRecord]); });
+          setUndoStack(function (prev) { return prev.concat([{ type: 'embankment', uid: embUid }]); });
+          playInterventionAnimation(mapRef.current, 'embankment', proposal.location.lon, proposal.location.lat);
+          setAddedProposalKeys(function (prev) { var next = Object.assign({}, prev); next[proposalKey] = true; return next; });
+        })
+        .catch(function (err) {
+          console.error('AI embankment comparison failed:', err);
+          setToolError('Failed to calculate flood impact for this AI proposal — check backend is running.');
+          setTimeout(function () { setToolError(null); }, 4000);
+        });
+      return;
+    }
+
+    var params;
+    if (proposal.action_type === 'widenChannel') {
+      params = { newWidth: proposal.parameters.new_width_m, length: proposal.parameters.section_length_m };
+    } else if (proposal.action_type === 'retentionPond') {
+      params = { area: proposal.parameters.area_m2, depth: proposal.parameters.depth_m };
+    } else {
+      // removeEncroachment has no formFields at all; desilt/clearDrains/
+      // warningGauge/greenBuffer get real tool defaults (see above).
+      params = defaultParamsForAiAction(proposal.action_type);
+    }
+
+    var payload = { lng: proposal.location.lon, lat: proposal.location.lat };
+    var marker = buildMarker(toolDef, payload, params, 'prevention');
+    marker.aiGenerated = true;
+    setMarkers(function (prev) { return prev.concat([marker]); });
+    setUndoStack(function (prev) { return prev.concat([{ type: 'marker', uid: marker._uid }]); });
+    playInterventionAnimation(mapRef.current, toolDef.key, proposal.location.lon, proposal.location.lat);
+    setAddedProposalKeys(function (prev) { var next = Object.assign({}, prev); next[proposalKey] = true; return next; });
+  }
+
+  // HUD map-frame controls -- every one drives a real maplibre method or
+  // browser API, never a no-op placeholder.
+  function hudZoomIn() { if (mapRef.current) mapRef.current.zoomIn(); }
+  function hudZoomOut() { if (mapRef.current) mapRef.current.zoomOut(); }
+  function hudResetBearing() { if (mapRef.current) mapRef.current.easeTo({ bearing: 0, pitch: 0, duration: 400 }); }
+  function hudToggleFloodLayer() {
+    var map = mapRef.current;
+    if (!map || !map.getLayer('flood-overlay-layer')) return;
+    var next = !floodLayerVisible;
+    map.setLayoutProperty('flood-overlay-layer', 'visibility', next ? 'visible' : 'none');
+    setFloodLayerVisible(next);
+  }
+  function hudLocateMe() {
+    if (!navigator.geolocation) {
+      setToolNotice('Location is not available in this browser.');
+      setTimeout(function () { setToolNotice(null); }, 3500);
+      return;
+    }
+    navigator.geolocation.getCurrentPosition(
+      function (pos) {
+        if (mapRef.current) {
+          mapRef.current.flyTo({ center: [pos.coords.longitude, pos.coords.latitude], zoom: 15, duration: 900 });
+        }
+      },
+      function () {
+        setToolNotice('Could not get your location — check location permissions.');
+        setTimeout(function () { setToolNotice(null); }, 3500);
+      },
+      { timeout: 8000 }
+    );
+  }
+
   function handlePrintReport() {
     const items = buildReportItems(markers, closedRoads);
     const counts = buildReportCounts(items);
@@ -7422,7 +7801,7 @@ export default function PlanWorkspace() {
   }).length;
 
   return (
-    <div style={{ position: 'fixed', inset: 0, background: '#0f172a' }}>
+    <div style={{ position: 'fixed', inset: 0, background: '#020B09' }}>
       <div
         style={{
           position: 'absolute',
@@ -7430,7 +7809,8 @@ export default function PlanWorkspace() {
           left: 0,
           right: 0,
           zIndex: 999,
-          background: 'rgba(15,23,42,0.96)',
+          background: 'rgba(6,45,41,0.96)',
+          borderBottom: '1px solid #3E5C56',
           padding: '10px 16px',
           display: 'flex',
           alignItems: 'center',
@@ -7442,8 +7822,8 @@ export default function PlanWorkspace() {
           onClick={function () { router.push('/map'); }}
           style={{
             background: 'transparent',
-            border: '1px solid #475569',
-            color: '#e2e8f0',
+            border: '1px solid #3E5C56',
+            color: '#F2F8F5',
             borderRadius: 8,
             padding: '6px 12px',
             cursor: 'pointer',
@@ -7453,15 +7833,15 @@ export default function PlanWorkspace() {
           ← Map
         </button>
 
-        <div style={{ display: 'flex', gap: 4, background: '#1e293b', padding: 4, borderRadius: 10 }}>
+        <div style={{ display: 'flex', gap: 4, background: '#0A3D37', padding: 4, borderRadius: 10 }}>
           <button
             onClick={function () { setPlanType('response'); setActiveTool(null); }}
             style={{
               padding: '6px 14px',
               borderRadius: 7,
               border: 'none',
-              background: planType === 'response' ? '#dc2626' : 'transparent',
-              color: planType === 'response' ? 'white' : '#94a3b8',
+              background: planType === 'response' ? '#C7FF28' : 'transparent',
+              color: planType === 'response' ? '#062D29' : '#DCEFE9',
               fontWeight: 700,
               fontSize: 12.5,
               cursor: 'pointer',
@@ -7475,8 +7855,8 @@ export default function PlanWorkspace() {
               padding: '6px 14px',
               borderRadius: 7,
               border: 'none',
-              background: planType === 'prevention' ? '#0d9488' : 'transparent',
-              color: planType === 'prevention' ? 'white' : '#94a3b8',
+              background: planType === 'prevention' ? '#C7FF28' : 'transparent',
+              color: planType === 'prevention' ? '#062D29' : '#DCEFE9',
               fontWeight: 700,
               fontSize: 12.5,
               cursor: 'pointer',
@@ -7486,14 +7866,13 @@ export default function PlanWorkspace() {
           </button>
         </div>
 
-        <div style={{ fontSize: 10, color: '#64748b', marginLeft: 12 }}>
-          Planning tool — for real emergencies call <b style={{ color: '#e2e8f0' }}>Rescue 1122</b>
+        <div style={{ fontSize: 10, color: '#DCEFE9', opacity: 0.6, marginLeft: 12 }}>
+          Planning tool — for real emergencies call <b style={{ color: '#F2F8F5' }}>Rescue 1122</b>
         </div>
-        <div style={{ display: 'flex', gap: 14, marginLeft: 'auto', fontSize: 11.5, color: '#94a3b8' }}>
-          <span><b style={{ color: '#f87171' }}>{scenario.affected_building_count}</b> buildings</span>
-          <span><b style={{ color: '#f87171' }}>{scenario.flooded_road_count}</b> roads flooded</span>
-          <span><b style={{ color: '#f87171' }}>{hospitalCount}</b> hospitals at risk</span>
-          <span><b style={{ color: '#38bdf8' }}>{scenario.avg_depth_m}m</b> avg depth</span>
+        <div style={{ display: 'flex', gap: 14, marginLeft: 'auto', fontSize: 11.5, color: '#DCEFE9' }}>
+          <span style={{ opacity: 0.85 }}>{scenarioLabel(scenario)}</span>
+          <span style={{ opacity: 0.6 }}>·</span>
+          <span><b style={{ color: '#C7FF28' }}>{scenario.water_level_m}m</b> water level</span>
         </div>
       </div>
 
@@ -7803,28 +8182,36 @@ export default function PlanWorkspace() {
           top: 60,
           left: 16,
           zIndex: 999,
-          background: 'white',
+          background: '#0A3D37',
+          border: '1px solid #3E5C56',
           borderRadius: 16,
           boxShadow: '0 8px 30px rgba(0,0,0,0.3)',
           padding: 14,
-          width: 250,
+          width: 290,
           maxHeight: 'calc(100vh - 90px)',
           overflowY: 'auto',
+          overflowX: 'hidden',
           fontFamily: 'system-ui, sans-serif',
         }}
       >
-        <div style={{ fontSize: 13, fontWeight: 800, color: '#0f172a', marginBottom: 3 }}>
-          {planType === 'response' ? 'Response actions' : 'Prevention measures'}
-        </div>
-        <div style={{ fontSize: 11, color: '#64748b', marginBottom: 10 }}>
-          {planType === 'response'
-            ? 'Actions for the flood happening now'
-            : (function () {
-                var meta = SCENARIO_META[scenario && scenario.cause_type];
-                if (!meta) return 'Fixes applied before a flood — see the effect below';
-                return meta.emoji + ' ' + meta.label + ' — ' + meta.description;
-              })()}
-        </div>
+        {planType === 'response' && (
+          <>
+            <div style={{ fontSize: 13, fontWeight: 800, color: '#F2F8F5', marginBottom: 3 }}>
+              Response actions
+            </div>
+            <div style={{ fontSize: 11, color: '#DCEFE9', opacity: 0.8, marginBottom: 10 }}>
+              Actions for the flood happening now
+            </div>
+          </>
+        )}
+        {planType === 'prevention' && (function () {
+          var meta = SCENARIO_META[scenario && scenario.cause_type];
+          return (
+            <div style={{ fontSize: 11, color: '#DCEFE9', opacity: 0.8, marginBottom: 10 }}>
+              {meta ? meta.emoji + ' ' + meta.label + ' — ' + meta.description : 'Fixes applied before a flood — see the effect below'}
+            </div>
+          );
+        })()}
 
         {planType === 'response' && (function () {
           let tone = null;
@@ -7869,7 +8256,7 @@ export default function PlanWorkspace() {
           );
         })()}
 
-        {TOOLS.map(function (tool) {
+        {planType === 'response' && TOOLS.map(function (tool) {
           const active = activeTool === tool.key;
           // A tool is locked when its validation is not written yet, when
           // the scenario has no rules, or while the depth data it checks
@@ -7892,9 +8279,9 @@ export default function PlanWorkspace() {
                 marginBottom: 5,
                 padding: '8px 10px',
                 borderRadius: 11,
-                border: active ? '2px solid ' + tool.color : '2px solid #e2e8f0',
-                background: active ? tool.color + '15' : '#f8fafc',
-                color: active ? tool.color : '#475569',
+                border: active ? '2px solid ' + tool.color : '1px solid #3E5C56',
+                background: active ? tool.color + '22' : '#0E4A43',
+                color: active ? tool.color : '#F2F8F5',
                 fontWeight: 700,
                 fontSize: 12,
                 cursor: locked ? 'not-allowed' : 'pointer',
@@ -7905,7 +8292,7 @@ export default function PlanWorkspace() {
               <span style={{ fontSize: 16 }}>{tool.emoji}</span>
               <span style={{ flex: 1 }}>{tool.label}</span>
               {notBuilt && (
-                <span style={{ fontSize: 9, fontWeight: 800, color: '#64748b', background: '#e2e8f0', borderRadius: 5, padding: '1px 5px' }}>
+                <span style={{ fontSize: 9, fontWeight: 800, color: '#DCEFE9', background: '#3E5C56', borderRadius: 5, padding: '1px 5px' }}>
                   P{tool.phase}
                 </span>
               )}
@@ -7913,7 +8300,7 @@ export default function PlanWorkspace() {
           );
         })}
 
-        {activeToolDef && (
+        {planType === 'response' && activeToolDef && (
           <div
             style={{
               marginTop: 8,
@@ -7937,9 +8324,32 @@ export default function PlanWorkspace() {
           </div>
         )}
 
+        {planType === 'prevention' && (
+          <PreventionPlanPanel
+            tools={TOOLS}
+            activeTool={activeTool}
+            setActiveTool={setActiveTool}
+            activeToolDef={activeToolDef}
+            causeType={causeType}
+            aiSuggestLoading={aiSuggestLoading}
+            aiSuggestResult={aiSuggestResult}
+            aiSuggestError={aiSuggestError}
+            aiCombinedImpact={aiCombinedImpact}
+            addedProposalKeys={addedProposalKeys}
+            onRunAiSuggest={runAiSuggest}
+            onAddProposal={addAiProposalToPlan}
+            onApplyFullPlan={applyFullAiPlan}
+            onDismissAiResult={function () {
+              setAiSuggestResult(null);
+              setAiSuggestError(null);
+              setAiCombinedImpact(null);
+            }}
+          />
+        )}
+
         {planType === 'response' && (
-        <div style={{ marginTop: 14, borderTop: '1px solid #e2e8f0', paddingTop: 12 }}>
-          <div style={{ fontSize: 12, fontWeight: 700, color: '#0f172a', marginBottom: 6 }}>
+        <div style={{ marginTop: 14, borderTop: '1px solid #3E5C56', paddingTop: 12 }}>
+          <div style={{ fontSize: 12, fontWeight: 700, color: '#F2F8F5', marginBottom: 6 }}>
             🚑 Rescue routing
           </div>
 
@@ -7949,9 +8359,9 @@ export default function PlanWorkspace() {
               width: '100%',
               padding: '8px',
               borderRadius: 9,
-              border: activeTool === 'setStart' ? '2px solid #2563eb' : '1px solid #e2e8f0',
-              background: activeTool === 'setStart' ? '#eff6ff' : '#f8fafc',
-              color: activeTool === 'setStart' ? '#2563eb' : '#475569',
+              border: activeTool === 'setStart' ? '2px solid #C7FF28' : '1px solid #3E5C56',
+              background: activeTool === 'setStart' ? '#C7FF2822' : '#0E4A43',
+              color: activeTool === 'setStart' ? '#C7FF28' : '#F2F8F5',
               fontSize: 11.5,
               fontWeight: 700,
               cursor: 'pointer',
@@ -8082,11 +8492,23 @@ export default function PlanWorkspace() {
               {routeInfo.error}
             </div>
           )}
+
+          <ResponseComparisonPanel
+            aiResponseLoading={aiResponseLoading}
+            aiResponseResult={aiResponseResult}
+            aiResponseError={aiResponseError}
+            addedProposalKeys={addedResponseProposalKeys}
+            onRun={runAiResponseCompare}
+            onAddProposal={addAiResponseProposalToPlan}
+            onApplyFullPlan={applyFullAiResponsePlan}
+            onDismiss={function () { setAiResponseResult(null); setAiResponseError(null); }}
+          />
         </div>
         )}
 
-        <div style={{ marginTop: 14, borderTop: '1px solid #e2e8f0', paddingTop: 12 }}>
-          <div style={{ fontSize: 12, fontWeight: 700, color: '#0f172a', marginBottom: 6 }}>
+
+        <div style={{ marginTop: 14, borderTop: '1px solid #3E5C56', paddingTop: 12 }}>
+          <div style={{ fontSize: 12, fontWeight: 700, color: '#FFFFFF', marginBottom: 6 }}>
             ✍️ Other action
           </div>
           <textarea
@@ -8096,7 +8518,7 @@ export default function PlanWorkspace() {
             rows={3}
             style={{
               width: '100%',
-              border: '1px solid #e2e8f0',
+              border: '1px solid #3E5C56',
               borderRadius: 10,
               padding: 8,
               fontSize: 11.5,
@@ -8115,8 +8537,8 @@ export default function PlanWorkspace() {
                 padding: '7px',
                 borderRadius: 9,
                 border: 'none',
-                background: '#0f172a',
-                color: 'white',
+                background: '#FFFFFF',
+                color: '#0f172a',
                 fontSize: 11.5,
                 fontWeight: 700,
                 cursor: 'pointer',
@@ -9155,7 +9577,144 @@ export default function PlanWorkspace() {
         </div>
       )}
 
-      <div ref={mapContainer} style={{ width: '100%', height: '100%' }} />
+      {/* -----------------------------------------------------------------
+          HUD map frame -- the map is rendered inside this single rounded,
+          inset container rather than bare full-bleed, per the dashboard
+          reference. Every control inside drives a real maplibre method
+          or a real scenario/state value; nothing here is decorative-only
+          data. Existing floating panels (tool sidebar, plan card, alerts,
+          etc.) stay direct children of the outer viewport wrapper, same
+          coordinates as before, so this frame's ~10-16px inset doesn't
+          require moving any of them.
+          ----------------------------------------------------------------- */}
+      <div
+        style={{
+          position: 'absolute',
+          top: 60,
+          left: 10,
+          right: 10,
+          bottom: 10,
+          borderRadius: 20,
+          overflow: 'hidden',
+          background: '#000000',
+          border: '1px solid rgba(199,255,40,0.14)',
+          boxShadow: 'inset 0 0 0 1px rgba(0,0,0,0.4), 0 20px 60px rgba(0,0,0,0.5)',
+        }}
+      >
+        <div ref={mapContainer} style={{ width: '100%', height: '100%' }} />
+
+        {/* Corner bracket accents -- thin lime "[ ]" framing, not a full
+            border, echoing the reference dashboard's HUD styling. */}
+        {[
+          { top: 5, left: 5, borderTop: '2px solid #C7FF28', borderLeft: '2px solid #C7FF28', borderTopLeftRadius: 8 },
+          { top: 5, right: 5, borderTop: '2px solid #C7FF28', borderRight: '2px solid #C7FF28', borderTopRightRadius: 8 },
+          { bottom: 5, left: 5, borderBottom: '2px solid #C7FF28', borderLeft: '2px solid #C7FF28', borderBottomLeftRadius: 8 },
+          { bottom: 5, right: 5, borderBottom: '2px solid #C7FF28', borderRight: '2px solid #C7FF28', borderBottomRightRadius: 8 },
+        ].map(function (corner, i) {
+          return (
+            <div
+              key={i}
+              style={Object.assign({ position: 'absolute', width: 26, height: 26, opacity: 0.85, pointerEvents: 'none', zIndex: 5 }, corner)}
+            />
+          );
+        })}
+
+        {/* Floating control stack, top-right -- inset further than the
+            corner brackets above (20 vs 5) so the bracket still frames
+            it instead of being hidden underneath. */}
+        <div style={{ position: 'absolute', top: 20, right: 20, zIndex: 20, display: 'flex', flexDirection: 'column', gap: 8 }}>
+          {[
+            { icon: '+', title: 'Zoom in', onClick: hudZoomIn },
+            { icon: '−', title: 'Zoom out', onClick: hudZoomOut },
+            { icon: '▤', title: floodLayerVisible ? 'Hide flood layer' : 'Show flood layer', onClick: hudToggleFloodLayer, active: floodLayerVisible },
+            { icon: '📍', title: 'Locate me', onClick: hudLocateMe },
+          ].map(function (ctrl, i) {
+            return (
+              <button
+                key={i}
+                title={ctrl.title}
+                onClick={ctrl.onClick}
+                style={{
+                  width: 34, height: 34, borderRadius: 10,
+                  border: '1px solid #3E5C56',
+                  background: ctrl.active === false ? '#0A3D37' : '#0A3D37',
+                  color: ctrl.active === false ? '#DCEFE9' : '#C7FF28',
+                  opacity: ctrl.active === false ? 0.55 : 1,
+                  fontSize: 15, fontWeight: 800, cursor: 'pointer',
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  boxShadow: '0 4px 14px rgba(0,0,0,0.4)',
+                }}
+              >
+                {ctrl.icon}
+              </button>
+            );
+          })}
+        </div>
+
+        {/* Compass / orientation badge, bottom-left -- reflects the map's
+            REAL bearing (mapBearing, from the maplibre 'rotate' event);
+            clicking resets to north-up via hudResetBearing. */}
+        <button
+          onClick={hudResetBearing}
+          title="Reset to north"
+          style={{
+            position: 'absolute', bottom: 20, left: 20, zIndex: 20,
+            width: 40, height: 40, borderRadius: '50%',
+            background: '#0A3D37', border: '1px solid #3E5C56',
+            cursor: 'pointer', boxShadow: '0 4px 14px rgba(0,0,0,0.4)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+          }}
+        >
+          <span
+            style={{
+              display: 'inline-block',
+              transform: 'rotate(' + (-mapBearing) + 'deg)',
+              color: '#C7FF28',
+              fontSize: 16,
+              lineHeight: 1,
+            }}
+          >
+            ▲
+          </span>
+        </button>
+
+        {/* Live simulation metrics, overlaying the map frame's bottom
+            edge -- every value below is the real current scenario output
+            (Backend/main.py's /flood response), not a placeholder. */}
+        <div
+          style={{
+            position: 'absolute', left: 68, bottom: 14, right: 300, zIndex: 15,
+            display: 'flex', gap: 8, overflowX: 'auto',
+          }}
+        >
+          {[
+            { icon: '💧', label: 'Water level', value: scenario.water_level_m + 'm' },
+            { icon: '🌊', label: 'Flooded area', value: (scenario.flooded_percent != null ? scenario.flooded_percent : '—') + '%' },
+            { icon: '🏚️', label: 'Buildings at risk', value: scenario.affected_building_count },
+            { icon: '🚧', label: 'Roads flooded', value: scenario.flooded_road_count },
+            { icon: '🏥', label: 'Hospitals at risk', value: hospitalCount },
+          ].map(function (m, i) {
+            return (
+              <div
+                key={i}
+                style={{
+                  flex: '0 0 auto',
+                  display: 'flex', alignItems: 'center', gap: 6,
+                  background: 'rgba(10,61,55,0.92)', border: '1px solid #3E5C56',
+                  borderRadius: 10, padding: '6px 10px',
+                  boxShadow: '0 4px 14px rgba(0,0,0,0.35)',
+                }}
+              >
+                <span style={{ fontSize: 13 }}>{m.icon}</span>
+                <span style={{ display: 'flex', flexDirection: 'column', lineHeight: 1.25 }}>
+                  <span style={{ fontSize: 12, fontWeight: 800, color: '#C7FF28' }}>{m.value}</span>
+                  <span style={{ fontSize: 8.5, color: '#DCEFE9', opacity: 0.7 }}>{m.label}</span>
+                </span>
+              </div>
+            );
+          })}
+        </div>
+      </div>
     </div>
   );
 }

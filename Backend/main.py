@@ -16,6 +16,13 @@ from database import SessionLocal, User, Scenario
 import flood_engine
 import road_flooding
 import routing
+import prevention_validation
+import ai_hazard_analyst
+import ai_proposer
+import response_validation
+import ai_response_hazard_reader
+import ai_response_strategist
+import ai_response_evaluator
 
 load_dotenv()
 SECRET_KEY = os.getenv("SECRET_KEY")
@@ -30,6 +37,25 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.on_event("startup")
+def _warm_ai_prevention_caches():
+    """Pre-loads the data ai_hazard_analyst/ai_proposer/prevention_validation
+    otherwise lazy-load on first use. Without this, /ai/prevention/suggest's
+    own ~35s time budget (AI_SUGGEST_TIME_BUDGET_S) gets eaten by cold-cache
+    I/O -- especially road_flooding.load_roads(), which parses roads.graphml
+    via osmnx and is slow -- instead of being spent on actual AI retries.
+    Measured directly: the first real request after a server restart took
+    ~58s total even though the AI loops' own deadline correctly capped
+    their own share at ~35s; the other ~23s was this cold-cache cost,
+    paid entirely before either deadline-checked loop even started."""
+    flood_engine.load_dem()
+    flood_engine.load_waterways()
+    flood_engine.load_buildings()
+    road_flooding.load_roads()
+    prevention_validation.load_roads_geojson()
+    prevention_validation.load_water_bodies_geojson()
 
 def get_db():
     db = SessionLocal()
@@ -790,6 +816,157 @@ def prevention_breakdown(request: PreventionSimulateRequest):
             },
             "interaction_note": interaction_note,
             "per_action_breakdown": breakdown,
+        }
+    except HTTPException:
+        raise
+    except Exception as ex:
+        import traceback
+        raise HTTPException(status_code=500, detail=str(type(ex).__name__) + ": " + str(ex) + " | " + traceback.format_exc()[-500:])
+
+
+class AISuggestRequest(BaseModel):
+    cause_type: str
+    water_level_m: float
+    # Already-placed plan actions, so the Proposer's overlap filter
+    # (ai_candidates.filter_out_overlapping) can't suggest a duplicate
+    # of something the user already added. Same loose per-item shape
+    # PreventionAction already uses (lon/lat, optionally more).
+    existing_plan_actions: list = []
+    max_proposals: int = 4
+
+
+# Overall wall-clock budget for one /ai/prevention/suggest request.
+# Part 5/6's own design: if the retry loop hasn't finished by then,
+# return whatever proposals already succeeded rather than failing the
+# whole request -- partial real results beat a failed one, especially
+# live. See ai_proposer.run_prevention_proposer's `deadline` param.
+AI_SUGGEST_TIME_BUDGET_S = 35
+
+
+@app.post("/ai/prevention/suggest")
+def ai_prevention_suggest(request: AISuggestRequest):
+    """
+    AI Prevention Proposer -- Hazard Analyst (Part 3) + Proposer
+    (Part 4) wired together behind one endpoint, per-call reliability
+    handled by Part 5 (ai_llm.call_llm_json).
+
+    The AI never gets to assert something is true. It proposes -- the
+    Hazard Analyst picks priority zones from REAL simulation stats
+    (assembled from the exact same flood_engine/road_flooding functions
+    /flood and /prevention/simulate already call); the Proposer picks a
+    candidate point + parameters from a REAL, pre-generated, finite list
+    (ai_candidates.py -- it can never invent a lat/lon). This app's own
+    deterministic code verifies: every proposal is checked against the
+    EXACT SAME click-validation rules a human placing an action by hand
+    would face (prevention_validation.py, ported from PlanWorkspace.js's
+    own validatePlacement), and every accepted proposal's impact is a
+    real terrain-physics before/after recomputation (ai_proposer.
+    compute_real_impact), never an LLM guess.
+    """
+    import time
+    deadline = time.time() + AI_SUGGEST_TIME_BUDGET_S
+    try:
+        simulation_stats = ai_hazard_analyst.get_current_simulation_stats(request.water_level_m)
+        hazard = ai_hazard_analyst.run_hazard_analyst(simulation_stats, deadline=deadline)
+
+        elevation, valid = flood_engine.load_dem()
+        bounds = flood_engine.get_dem_bounds()
+        waterways = flood_engine.load_waterways()
+        buildings = flood_engine.load_buildings()
+        roads = prevention_validation.load_roads_geojson()
+        water_bodies = prevention_validation.load_water_bodies_geojson()
+
+        proposer_result = ai_proposer.run_prevention_proposer(
+            hazard["priority_zones"], request.cause_type, elevation, bounds, request.water_level_m,
+            waterways, buildings, roads, water_bodies,
+            existing_plan_actions=request.existing_plan_actions,
+            max_proposals=request.max_proposals,
+            deadline=deadline,
+        )
+
+        return {
+            "hazard_summary": hazard,
+            "proposals": proposer_result["proposals"],
+            # Real event log (zone/action-type attempts, real rejection
+            # reasons, real acceptances) for the frontend's live
+            # progress display -- see run_prevention_proposer's
+            # docstring. Never fabricated client-side.
+            "trace": proposer_result["trace"],
+            "simulation_stats": simulation_stats,
+        }
+    except HTTPException:
+        raise
+    except Exception as ex:
+        import traceback
+        raise HTTPException(status_code=500, detail=str(type(ex).__name__) + ": " + str(ex) + " | " + traceback.format_exc()[-500:])
+
+
+class AIResponseCompareRequest(BaseModel):
+    water_level_m: float
+    # The user's real, currently-placed Response Plan actions -- same
+    # loose per-item shape as AISuggestRequest.existing_plan_actions,
+    # plus params/parameters (for evacuationZone/warningPoint's real
+    # coverage radius) and road_u/road_v (for closeRoad, so the Impact
+    # Evaluator can match it against the real flooded-edge list). Only
+    # river_overflow is supported (response_validation.py only ports
+    # that scenario's rules so far -- see its own module docstring).
+    existing_response_actions: list = []
+    max_proposals: int = 4
+
+
+AI_RESPONSE_TIME_BUDGET_S = 35
+
+
+@app.post("/ai/response/compare")
+def ai_response_compare(request: AIResponseCompareRequest):
+    """
+    Response-side multi-agent AI comparison -- Hazard Reader (Part 1) +
+    Strategist (Part 2) + Impact Evaluator (Part 3) wired together,
+    mirroring /ai/prevention/suggest's own structure exactly.
+
+    The AI never gets to assert something is true. The Hazard Reader
+    identifies real priority zones (reusing the proven Hazard Analyst)
+    and filters out ones the user's own plan already covers by real
+    geometry; the Strategist picks a candidate point + parameters from a
+    REAL, pre-generated, finite list per zone (ai_response_candidates.py)
+    and every proposal is checked against the EXACT SAME click-validation
+    rules a human placing an action by hand would face
+    (response_validation.py, ported from PlanWorkspace.js's own response
+    resolvers); the Impact Evaluator's before/after is real coverage math
+    (ai_response_evaluator.py, the same function powering the existing
+    Response Impact Report feature) run once against the user's plan and
+    once against the user's plan plus the accepted proposals -- never an
+    LLM guess at what improved.
+    """
+    import time
+    deadline = time.time() + AI_RESPONSE_TIME_BUDGET_S
+    cause_type = "river_overflow"
+    try:
+        simulation_stats = ai_hazard_analyst.get_current_simulation_stats(request.water_level_m)
+        hazard = ai_response_hazard_reader.run_hazard_reader(
+            simulation_stats, existing_response_actions=request.existing_response_actions,
+            deadline=deadline,
+        )
+
+        roads = prevention_validation.load_roads_geojson()
+        ctx = response_validation.build_context(request.water_level_m, roads, request.existing_response_actions)
+
+        strategist_result = ai_response_strategist.run_response_strategist(
+            hazard["uncovered_zones"], cause_type, ctx,
+            max_proposals=request.max_proposals, deadline=deadline,
+        )
+
+        proposed_actions = [ai_response_evaluator.proposal_to_action(p) for p in strategist_result["proposals"]]
+        comparison = ai_response_evaluator.run_response_evaluator(
+            request.water_level_m, ctx, request.existing_response_actions, proposed_actions,
+        )
+
+        return {
+            "hazard_summary": hazard,
+            "proposals": strategist_result["proposals"],
+            "trace": strategist_result["trace"],
+            "comparison": comparison,
+            "simulation_stats": simulation_stats,
         }
     except HTTPException:
         raise
