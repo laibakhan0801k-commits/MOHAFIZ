@@ -446,7 +446,8 @@ def _build_terrain_args(actions):
             encroachments.append({"lon": lon, "lat": lat, "radius_m": 7, "depth_m": 2, "uid": uid})
         elif atype in ("desilt", "clearDrains", "greenBuffer"):
             capacity_actions.append({"type": atype, "params": params,
-                                      "target_waterway_id": twid, "uid": uid})
+                                      "target_waterway_id": twid, "uid": uid,
+                                      "lat": lat, "lon": lon})
 
     return embankments, ponds, widen_actions, encroachments, capacity_actions
 
@@ -495,31 +496,28 @@ def _run_prevention_sim(cause_type, params, actions, elevation, bounds, direct_w
         ponds, widen_actions, encroachments, cause_type=cause_type
     )
 
-    # Level-driven causes (river overflow / dam release) don't have a real
-    # rainfall volume this DEM can "own" — the water is arriving from far
-    # upstream, so a single pond or widened channel section genuinely
-    # cannot lower the WHOLE river's flood stage. Diluting its intercepted
-    # volume across the entire study area (as volume-based causes correctly
-    # do) made every structural action look like it did nothing — a few
-    # thousand m3 against a basin holding millions is a rounding error.
-    # What a local measure CAN honestly do is protect its own immediate
-    # surroundings, so for these causes we keep the basin-wide water level
-    # unchanged and apply the intercepted volume as a local protection zone
-    # instead (flood_engine.apply_local_protection).
-    level_driven = cause_type in ("river_overflow", "dam_release")
-
+    # No cause type has a real basin-wide volume that a single local
+    # structural action (a pond, a widened 50-100m section, one removed
+    # encroachment) can honestly draw down — the catchment or the
+    # upstream river/dam holds orders of magnitude more water than any
+    # one measure intercepts, so diluting that volume across the whole
+    # study area made every structural action look like it did nothing
+    # (a few thousand m3 against a basin holding millions is a rounding
+    # error, for EVERY cause type, not just the level-driven ones). What
+    # a local measure CAN honestly do is protect its own immediate
+    # surroundings, so structural volume is always spent as a local
+    # protection zone (flood_engine.apply_local_protection) instead of
+    # folded into the basin-wide water level. Only capacity actions that
+    # genuinely change catchment-wide runoff (desilt/clearDrains/
+    # greenBuffer, for rainfall/drainage_failure) affect the basin-wide
+    # level below.
     if direct_water_level_m is not None:
         wl_before = direct_water_level_m
         capacity_meta = flood_engine.compute_capacity_gain(capacity_actions, cause_type=cause_type)
         if capacity_meta["applies_to_cause"]:
-            # Volume-based causes: structural interception competes with the
-            # same catchment-wide runoff volume the water level came from —
-            # solving for a new basin-wide equilibrium level is the honest
-            # model here.
             vol_before = flood_engine.volume_stored_below(wl_before)
-            vol_after = max(0.0, vol_before - structural_vol_m3)
             rc_after = capacity_meta["runoff_coefficient_after"]
-            vol_after = vol_after * (rc_after / 0.6)
+            vol_after = vol_before * (rc_after / 0.6)
             wl_after = flood_engine.water_level_from_volume(vol_after) if vol_after > 0 else float(elevation.min()) - 1.0
         else:
             wl_after = wl_before
@@ -533,10 +531,8 @@ def _run_prevention_sim(cause_type, params, actions, elevation, bounds, direct_w
         capacity_meta = flood_engine.compute_capacity_gain(capacity_actions, cause_type=cause_type)
         if capacity_meta["applies_to_cause"]:
             rc_after = capacity_meta["runoff_coefficient_after"]
-            # Subtract structural volume from the before-volume, then scale by
-            # runoff coefficient change from capacity actions.
             vol_before = flood_engine.volume_stored_below(wl_before)
-            vol_after = max(0.0, vol_before - structural_vol_m3) * (rc_after / 0.6)
+            vol_after = vol_before * (rc_after / 0.6)
             try:
                 if vol_after <= 0:
                     severity_after = 0
@@ -562,11 +558,10 @@ def _run_prevention_sim(cause_type, params, actions, elevation, bounds, direct_w
     engineered_mask = terrain_meta.pop('engineered_mask')
 
     local_protection_m3 = 0.0
-    if level_driven:
-        protection = flood_engine.apply_local_protection(elevation, bounds, ponds, widen_actions, encroachments)
-        if protection.any():
-            modified = modified + protection
-            local_protection_m3 = structural_vol_m3
+    protection = flood_engine.apply_local_protection(elevation, bounds, ponds, widen_actions, encroachments)
+    if protection.any():
+        modified = modified + protection
+        local_protection_m3 = structural_vol_m3
 
     # A pond/widened channel/restored-channel footprint holds water BY
     # DESIGN — that's the measure working, not storm damage. Excluded here

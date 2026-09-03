@@ -56,22 +56,25 @@ const SAMPLE_QUESTIONS = [
   "What prevention would protect this area?",
 ];
 
-// Real numbers, computed by actually running a River Overflow scenario
-// (bank_rise_m = 1.0 -> water_level_m 522, 11% of the modeled area
-// flooded) through this app's own flood engine, then placing a 5-pin
-// response plan (evacuation zone, warning point, boat launch, relief/
-// medical post, road closure) and running the exact same coverage math
-// PlanWorkspace.js uses for the Response Impact Report — against the
-// real buildings/facilities/roads data for H-8/H-9. Not invented.
-const EXAMPLE = {
-  bankRiseM: 1.0,
-  waterLevelM: 522,
-  floodedPercent: 11,
-  atRiskBuildings: 51,
-  atRiskPeople: 332,
-  floodedRoadSegments: 532,
-  before: { evac: 0, warning: 0, rescue: 0, relief: 0, roadsOpen: 532, roadsClosed: 0 },
-  after: { evac: 49, warning: 55, rescue: 57, relief: 43, roadsOpen: 531, roadsClosed: 1 },
+// Real numbers and real map screenshots, both from an actual run through
+// the live app (not the API in isolation): a moderate-rainfall scenario
+// (band "moderate", 10.1-30mm/24hr -> water_level_m 511.7, 0.72% of the
+// modeled area flooded) with a real 4-action prevention plan placed by
+// clicking the actual map — desilt (100m), unblock drain (30m), a tree
+// buffer, and a water storage pond (10,000m2, 3m deep) on a genuinely
+// flooded pixel near H-9. 130m of waterway is the actual, correctly-
+// summed treated length (see flood_engine.compute_capacity_gain). The
+// capacity actions alone move flooded%/roads/depth by an amount too
+// small to register at pixel resolution — the pond is what makes this
+// run's before/after real and non-zero. Screenshots below are the
+// literal Before/After panels from that run's own Prevention Impact
+// Report. Not invented.
+const PREVENTION_EXAMPLE = {
+  before: { floodedPercent: 0.72, avgDepthM: 2.53 },
+  after: { floodedPercent: 0.71, avgDepthM: 2.49 },
+  treatedLengthM: 130,
+  areaSavedM2: 4773,
+  volumeStoredM3: 30000,
 };
 
 export default function Home() {
@@ -228,153 +231,129 @@ export default function Home() {
       </section>
 
       {/* Flood context — real, sourced numbers only */}
-      <section className="bg-ink px-6 py-20">
-        <div className="max-w-4xl mx-auto mh-card mh-fade-in border-t-2 border-alert bg-surface rounded-2xl px-8 py-12">
-          <div className="font-body text-xs font-semibold tracking-wide text-alert uppercase">
-            <span className="inline-block w-1.5 h-1.5 rounded-full bg-alert mr-2 align-middle" />
-            This isn&rsquo;t rare — it&rsquo;s annual
-          </div>
-          <h2 className="font-display text-3xl mt-2 text-paper">The Real Story</h2>
-          <p className="font-body text-xs text-mint mb-10 mt-1">
-            Pakistan&rsquo;s 2025 monsoon season, by the numbers — NDMA / OCHA.
-          </p>
-
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-8 mb-10">
-            <div className="text-center">
-              <div className="font-mono text-4xl sm:text-5xl font-medium text-alert">
-                <CountUpNumber end={1037} suffix="+" />
-              </div>
-              <div className="font-body text-xs text-mint mt-2">Lives lost</div>
-            </div>
-            <div className="text-center">
-              <div className="font-mono text-4xl sm:text-5xl font-medium text-alert">
-                <CountUpNumber end={6.9} decimals={1} suffix="M" />
-              </div>
-              <div className="font-body text-xs text-mint mt-2">People affected</div>
-            </div>
-            <div className="text-center">
-              <div className="font-mono text-4xl sm:text-5xl font-medium text-alert">
-                <CountUpNumber end={229700} suffix="+" />
-              </div>
-              <div className="font-body text-xs text-mint mt-2">Homes damaged or destroyed</div>
-            </div>
-            <div className="text-center">
-              <div className="font-mono text-4xl sm:text-5xl font-medium text-alert">
-                <CountUpNumber end={3} suffix="M" />
-              </div>
-              <div className="font-body text-xs text-mint mt-2">People displaced</div>
-            </div>
-          </div>
-
-          <p className="font-body text-base leading-relaxed text-mint">
-            Punjab and Khyber Pakhtunkhwa took the worst of it — Punjab&rsquo;s
-            worst flooding in four decades, KP alone recording over 500
-            deaths. The 2026 season is already underway, and by late July had
-            killed over
-            <span className="font-mono font-medium text-alert"> 100 </span>
-            people, with the worst of the season still ahead. Most of the
-            communities behind these numbers had no plan in place before the
-            water arrived.
-          </p>
-          <Link href="/how-it-works" className="inline-block mt-6 font-body text-sm text-flow underline">
-            Read the full walkthrough
-          </Link>
-        </div>
-      </section>
-
-      {/* Real before/after example — genuine app output, clearly labeled */}
+      {/* Real before/after prevention-plan example */}
       <section className="bg-ink px-6 py-16">
         <div className="max-w-5xl mx-auto">
-          <div className="font-body text-xs font-semibold tracking-wide text-flow uppercase mb-2">
-            <span className="inline-block w-1.5 h-1.5 rounded-full bg-flow mr-2 align-middle" />
-            A worked example, not a projection
-          </div>
-          <h2 className="font-display text-3xl text-paper mb-2">
-            Example: a River Overflow response plan we tested.
+          <h2 className="font-display text-3xl sm:text-4xl font-bold text-paper mb-4">
+            A real prevention plan we tested.
           </h2>
           <p className="font-body text-sm text-mint mb-10 max-w-2xl">
-            A real 1.0m nullah rise ({EXAMPLE.waterLevelM}m water level, {EXAMPLE.floodedPercent}% of
-            the modeled area flooded) run through Mohafiz&rsquo;s own engine, then a real 5-action
-            response plan tested against it — evacuation zone, warning point, boat launch, relief/medical
-            post, and one road closure. These are this app&rsquo;s own computed numbers, not an
-            illustration.
+            A real rainfall scenario ({PREVENTION_EXAMPLE.before.floodedPercent}% of the modeled area
+            flooded) run through Mohafiz&rsquo;s own engine, then a real prevention plan — desilting,
+            unblocking a drain, a tree buffer, and a small water storage pond,{' '}
+            {PREVENTION_EXAMPLE.treatedLengthM}m of waterway actually treated — tested against it. The
+            pond alone protects {PREVENTION_EXAMPLE.areaSavedM2.toLocaleString()} m² and intercepts{' '}
+            {PREVENTION_EXAMPLE.volumeStoredM3.toLocaleString()} m³ before it reaches the floodplain.
+            These are this app&rsquo;s own computed numbers, not an illustration.
           </p>
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-            <div className="mh-card mh-fade-in border-t-2 border-alert bg-surface rounded-2xl px-8 py-8">
-              <div className="font-body text-xs font-semibold tracking-wide text-alert uppercase mb-6">
-                Before — no plan placed
+            <div className="mh-card mh-fade-in bg-surface rounded-2xl overflow-hidden">
+              <div className="px-6 pt-6">
+                <div className="flex items-center gap-2 font-body text-sm font-semibold text-alert">
+                  <span className="w-2 h-2 rounded-full bg-alert" />
+                  Before (no prevention)
+                </div>
               </div>
-              <div className="space-y-4">
-                <div className="flex items-baseline justify-between">
-                  <span className="font-body text-sm text-mint">Evacuation zone coverage</span>
-                  <span className="font-mono text-2xl text-alert">{EXAMPLE.before.evac}%</span>
+              <div className="mx-6 mt-4 h-52 overflow-hidden rounded-xl border border-line">
+                <img
+                  src="/images/prevention-before.png"
+                  alt="Before prevention — flood extent map"
+                  className="w-full h-full object-cover"
+                />
+              </div>
+              <div className="mt-6 grid grid-cols-2 divide-x divide-line border-t border-line">
+                <div className="px-6 py-4">
+                  <div className="font-body text-xs text-mint/70">Flooded</div>
+                  <div className="font-mono text-xl font-bold text-paper">{PREVENTION_EXAMPLE.before.floodedPercent}%</div>
                 </div>
-                <div className="flex items-baseline justify-between">
-                  <span className="font-body text-sm text-mint">Warning range</span>
-                  <span className="font-mono text-2xl text-alert">{EXAMPLE.before.warning}%</span>
-                </div>
-                <div className="flex items-baseline justify-between">
-                  <span className="font-body text-sm text-mint">Rescue-staging reach</span>
-                  <span className="font-mono text-2xl text-alert">{EXAMPLE.before.rescue}%</span>
-                </div>
-                <div className="flex items-baseline justify-between">
-                  <span className="font-body text-sm text-mint">Relief / medical reach</span>
-                  <span className="font-mono text-2xl text-alert">{EXAMPLE.before.relief}%</span>
-                </div>
-                <div className="flex items-baseline justify-between pt-3 border-t border-line">
-                  <span className="font-body text-sm text-mint">Flooded roads</span>
-                  <span className="font-mono text-base text-alert">
-                    {EXAMPLE.before.roadsOpen} open, {EXAMPLE.before.roadsClosed} closed
-                  </span>
+                <div className="px-6 py-4">
+                  <div className="font-body text-xs text-mint/70">Avg depth</div>
+                  <div className="font-mono text-xl font-bold text-paper">{PREVENTION_EXAMPLE.before.avgDepthM}m</div>
                 </div>
               </div>
             </div>
 
-            <div className="mh-card mh-fade-in border-t-2 border-flow bg-surface rounded-2xl px-8 py-8">
-              <div className="font-body text-xs font-semibold tracking-wide text-flow uppercase mb-6">
-                After — 5-action response plan
+            <div className="mh-card mh-fade-in bg-surface rounded-2xl overflow-hidden">
+              <div className="px-6 pt-6">
+                <div className="flex items-center gap-2 font-body text-sm font-semibold text-flow">
+                  <span className="w-2 h-2 rounded-full bg-flow" />
+                  After (with prevention)
+                </div>
               </div>
-              <div className="space-y-4">
-                <div className="flex items-baseline justify-between">
-                  <span className="font-body text-sm text-mint">Evacuation zone coverage</span>
-                  <span className="font-mono text-2xl text-flow">
-                    <CountUpNumber end={EXAMPLE.after.evac} suffix="%" />
-                  </span>
+              <div className="mx-6 mt-4 h-52 overflow-hidden rounded-xl border border-line">
+                <img
+                  src="/images/prevention-after.png"
+                  alt="After prevention — reduced flood extent map"
+                  className="w-full h-full object-cover"
+                />
+              </div>
+              <div className="mt-6 grid grid-cols-2 divide-x divide-line border-t border-line">
+                <div className="px-6 py-4">
+                  <div className="font-body text-xs text-mint/70">Flooded</div>
+                  <div className="font-mono text-xl font-bold text-flow">
+                    <CountUpNumber end={PREVENTION_EXAMPLE.after.floodedPercent} decimals={2} suffix="%" />
+                  </div>
                 </div>
-                <div className="flex items-baseline justify-between">
-                  <span className="font-body text-sm text-mint">Warning range</span>
-                  <span className="font-mono text-2xl text-flow">
-                    <CountUpNumber end={EXAMPLE.after.warning} suffix="%" />
-                  </span>
-                </div>
-                <div className="flex items-baseline justify-between">
-                  <span className="font-body text-sm text-mint">Rescue-staging reach</span>
-                  <span className="font-mono text-2xl text-flow">
-                    <CountUpNumber end={EXAMPLE.after.rescue} suffix="%" />
-                  </span>
-                </div>
-                <div className="flex items-baseline justify-between">
-                  <span className="font-body text-sm text-mint">Relief / medical reach</span>
-                  <span className="font-mono text-2xl text-flow">
-                    <CountUpNumber end={EXAMPLE.after.relief} suffix="%" />
-                  </span>
-                </div>
-                <div className="flex items-baseline justify-between pt-3 border-t border-line">
-                  <span className="font-body text-sm text-mint">Flooded roads</span>
-                  <span className="font-mono text-base text-flow">
-                    {EXAMPLE.after.roadsOpen} open, {EXAMPLE.after.roadsClosed} closed
-                  </span>
+                <div className="px-6 py-4">
+                  <div className="font-body text-xs text-mint/70">Avg depth</div>
+                  <div className="font-mono text-xl font-bold text-flow">
+                    <CountUpNumber end={PREVENTION_EXAMPLE.after.avgDepthM} decimals={2} suffix="m" />
+                  </div>
                 </div>
               </div>
             </div>
           </div>
+        </div>
+      </section>
 
-          <p className="font-body text-xs text-mint/70 mt-4">
-            {EXAMPLE.atRiskBuildings} buildings (~{EXAMPLE.atRiskPeople} people) were at risk in this run,
-            out of {EXAMPLE.floodedRoadSegments} flooded road segments modeled across the sector — one
-            local plan doesn&rsquo;t cover a whole basin, and this example says so plainly.
-          </p>
+      {/* This exact corridor's own flood history — not national stats */}
+      <section className="bg-ink px-6 py-20">
+        <div className="max-w-5xl mx-auto mh-card mh-fade-in bg-surface rounded-2xl px-8 py-12">
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-10 items-start">
+            <div>
+              <div className="relative h-64 overflow-hidden rounded-xl border border-line">
+                <img
+                  src="https://upload.wikimedia.org/wikipedia/commons/f/fe/Lai_Nullah.JPG"
+                  alt="Nullah Leh in Rawalpindi"
+                  className="w-full h-full object-cover"
+                />
+              </div>
+              <p className="font-body text-xs text-mint/60 mt-3 text-center">
+                Nullah Leh, Rawalpindi — the actual channel this corridor is built around.
+              </p>
+              <p className="font-body text-xs text-mint/60 mt-1 text-center">
+                Photo: Faizan Sh,{" "}
+                <a
+                  href="https://commons.wikimedia.org/wiki/File:Lai_Nullah.JPG"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="underline hover:text-mint"
+                >
+                  Wikimedia Commons
+                </a>
+                , CC BY-SA 4.0.
+              </p>
+            </div>
+
+            <div>
+              <h2 className="font-display text-3xl text-paper">The Real Story</h2>
+              <p className="font-body text-base leading-relaxed text-mint mt-5">
+                Nullah Leh, Korang Nullah — the exact corridor this project simulates.
+              </p>
+              <p className="font-body text-base leading-relaxed text-mint mt-4">
+                This corridor has flooded before — documented events in{" "}
+                <span className="font-mono font-medium text-alert">2001, 2008, 2023, and 2025</span>.
+                In August 2026, Saidpur recorded{" "}
+                <span className="font-mono font-medium text-alert">85mm</span> of rain and Rawal Dam —
+                on the Korang River, part of this project&rsquo;s own named corridor — opened its
+                spillway at <span className="font-mono font-medium text-alert">99.8%</span> capacity.
+                A 2020 budget of <span className="font-mono font-medium text-alert">Rs40M</span> to
+                desilt Nullah Leh came with a warning: a 12ft rise if it didn&rsquo;t happen. This
+                isn&rsquo;t a hypothetical corridor — it&rsquo;s the one Mohafiz actually models.
+              </p>
+            </div>
+          </div>
         </div>
       </section>
 
