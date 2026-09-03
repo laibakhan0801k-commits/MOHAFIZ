@@ -5526,6 +5526,23 @@ export default function PlanWorkspace() {
     // still driven by the same real maplibre methods/events underneath.
     mapRef.current.on('rotate', function () { setMapBearing(mapRef.current.getBearing()); });
 
+    // MapLibre caches the container's width/height at creation time and
+    // reuses them for every pixel<->lngLat conversion after that -- it has
+    // no way to know the container was resized unless told. The sidebar
+    // and tool panels here are absolutely-positioned overlays (not flex
+    // siblings), so they shouldn't push this container's size around, but
+    // a page-level scrollbar appearing/disappearing (e.g. a taller tool
+    // hint pushing body content past the viewport), a window resize, or a
+    // browser/OS zoom change all shrink or grow this div without
+    // maplibre ever finding out -- every click is then converted through a
+    // stale transform until something (e.g. zooming, which recomputes the
+    // transform as a side effect) forces a resize. A ResizeObserver is the
+    // only way to catch every possible cause rather than chasing each one.
+    const mapResizeObserver = new ResizeObserver(function () {
+      if (mapRef.current) mapRef.current.resize();
+    });
+    mapResizeObserver.observe(mapContainer.current);
+
     mapRef.current.on('load', async () => {
       const map = mapRef.current;
       const w = scenario.flood_image_bounds[0];
@@ -6212,6 +6229,8 @@ export default function PlanWorkspace() {
       // eslint-disable-next-line react-hooks/set-state-in-effect -- fires from the map's async 'load' event callback, not synchronously during the effect body
       setStatus('ready');
     });
+
+    return function () { mapResizeObserver.disconnect(); };
   }, [scenario]);
 
   useEffect(() => {
@@ -8194,24 +8213,18 @@ export default function PlanWorkspace() {
           fontFamily: 'system-ui, sans-serif',
         }}
       >
-        {planType === 'response' && (
-          <>
-            <div style={{ fontSize: 13, fontWeight: 800, color: '#F2F8F5', marginBottom: 3 }}>
-              Response actions
-            </div>
-            <div style={{ fontSize: 11, color: '#DCEFE9', opacity: 0.8, marginBottom: 10 }}>
-              Actions for the flood happening now
-            </div>
-          </>
-        )}
-        {planType === 'prevention' && (function () {
-          var meta = SCENARIO_META[scenario && scenario.cause_type];
-          return (
-            <div style={{ fontSize: 11, color: '#DCEFE9', opacity: 0.8, marginBottom: 10 }}>
-              {meta ? meta.emoji + ' ' + meta.label + ' — ' + meta.description : 'Fixes applied before a flood — see the effect below'}
-            </div>
-          );
-        })()}
+        <div style={{ fontSize: 13, fontWeight: 800, color: '#F2F8F5', marginBottom: 3 }}>
+          {planType === 'response' ? 'Response actions' : 'Prevention measures'}
+        </div>
+        <div style={{ fontSize: 11, color: '#DCEFE9', marginBottom: 10 }}>
+          {planType === 'response'
+            ? 'Actions for the flood happening now'
+            : (function () {
+                var meta = SCENARIO_META[scenario && scenario.cause_type];
+                if (!meta) return 'Fixes applied before a flood — see the effect below';
+                return meta.emoji + ' ' + meta.label + ' — ' + meta.description;
+              })()}
+        </div>
 
         {planType === 'response' && (function () {
           let tone = null;
@@ -8279,9 +8292,9 @@ export default function PlanWorkspace() {
                 marginBottom: 5,
                 padding: '8px 10px',
                 borderRadius: 11,
-                border: active ? '2px solid ' + tool.color : '1px solid #3E5C56',
-                background: active ? tool.color + '22' : '#0E4A43',
-                color: active ? tool.color : '#F2F8F5',
+                border: active ? '2px solid ' + tool.color : '2px solid #3E5C56',
+                background: active ? tool.color + '30' : '#062D29',
+                color: active ? tool.color : '#DCEFE9',
                 fontWeight: 700,
                 fontSize: 12,
                 cursor: locked ? 'not-allowed' : 'pointer',
@@ -8306,7 +8319,7 @@ export default function PlanWorkspace() {
               marginTop: 8,
               padding: 9,
               borderRadius: 10,
-              background: activeToolDef.color + '12',
+              background: activeToolDef.color + '25',
               color: activeToolDef.color,
               fontSize: 11,
               fontWeight: 600,
@@ -8506,9 +8519,8 @@ export default function PlanWorkspace() {
         </div>
         )}
 
-
         <div style={{ marginTop: 14, borderTop: '1px solid #3E5C56', paddingTop: 12 }}>
-          <div style={{ fontSize: 12, fontWeight: 700, color: '#FFFFFF', marginBottom: 6 }}>
+          <div style={{ fontSize: 12, fontWeight: 700, color: '#F2F8F5', marginBottom: 6 }}>
             ✍️ Other action
           </div>
           <textarea
@@ -8525,6 +8537,8 @@ export default function PlanWorkspace() {
               fontFamily: 'system-ui, sans-serif',
               resize: 'vertical',
               boxSizing: 'border-box',
+              background: '#062D29',
+              color: '#F2F8F5',
             }}
           />
 
@@ -8537,8 +8551,8 @@ export default function PlanWorkspace() {
                 padding: '7px',
                 borderRadius: 9,
                 border: 'none',
-                background: '#FFFFFF',
-                color: '#0f172a',
+                background: '#C7FF28',
+                color: '#062D29',
                 fontSize: 11.5,
                 fontWeight: 700,
                 cursor: 'pointer',
@@ -8681,9 +8695,9 @@ export default function PlanWorkspace() {
               flex: 1,
               padding: '7px',
               borderRadius: 9,
-              border: '1px solid #e2e8f0',
-              background: '#f8fafc',
-              color: '#475569',
+              border: '1px solid #3E5C56',
+              background: '#062D29',
+              color: '#DCEFE9',
               fontSize: 11.5,
               fontWeight: 600,
               cursor: 'pointer',
@@ -8697,9 +8711,9 @@ export default function PlanWorkspace() {
               flex: 1,
               padding: '7px',
               borderRadius: 9,
-              border: '1px solid #fecaca',
-              background: '#fef2f2',
-              color: '#dc2626',
+              border: '1px solid #FF5A36',
+              background: '#062D29',
+              color: '#FF5A36',
               fontSize: 11.5,
               fontWeight: 600,
               cursor: 'pointer',
@@ -8750,7 +8764,8 @@ export default function PlanWorkspace() {
           bottom: 16,
           right: 16,
           zIndex: 999,
-          background: 'white',
+          background: '#0A3D37',
+          border: '1px solid #3E5C56',
           borderRadius: 16,
           boxShadow: '0 8px 30px rgba(0,0,0,0.3)',
           padding: 14,
@@ -8760,7 +8775,7 @@ export default function PlanWorkspace() {
           fontFamily: 'system-ui, sans-serif',
         }}
       >
-        <div style={{ fontSize: 13, fontWeight: 800, color: '#0f172a', marginBottom: 8 }}>
+        <div style={{ fontSize: 15, fontWeight: 800, color: '#F2F8F5', marginBottom: 8 }}>
           {planType === 'response' ? '🚨 Response plan' : '🛡️ Prevention plan'}
         </div>
 
@@ -8809,7 +8824,7 @@ export default function PlanWorkspace() {
         )}
 
         {currentMarkers.length === 0 && currentEmbankments.length === 0 && currentNotes.length === 0 && closedRoads.length === 0 && (
-          <div style={{ fontSize: 11.5, color: '#94a3b8' }}>
+          <div style={{ fontSize: 13.5, color: '#DCEFE9' }}>
             Nothing added yet. Pick an action, then click the map.
           </div>
         )}
@@ -9162,7 +9177,6 @@ export default function PlanWorkspace() {
             {(function () {
               var impact = deriveImpact(preventionResult.before, preventionResult.after);
               var goodColor = '#059669';
-              var flatColor = '#94a3b8';
               if (!impact.hasMeasurableEffect) {
                 return (
                   <div style={{
@@ -9179,42 +9193,65 @@ export default function PlanWorkspace() {
                   </div>
                 );
               }
+              var beforeRoads = preventionResult.before.roads_cut || 0;
+              var beforeBuildings = preventionResult.before.buildings_affected || 0;
+              var showRoads = impact.roadsSaved > 0;
+              var showBuildings = impact.buildingsSaved > 0;
+              var showHoldingTheLine = !showRoads && !showBuildings && (beforeRoads > 0 || beforeBuildings > 0);
+
               return (
                 <div style={{
                   background: '#f0fdf4',
                   border: '1px solid #bbf7d0',
                   borderRadius: 12,
-                  padding: 12,
-                  display: 'flex',
-                  gap: 20,
-                  justifyContent: 'center',
-                  fontSize: 12,
+                  padding: 16,
                   marginBottom: 8,
                 }}>
-                  <div>
-                    <span style={{ color: impact.floodedPercentChange > 0 ? goodColor : flatColor, fontWeight: 800 }}>
-                      {impact.floodedPercentChange}%
-                    </span>
-                    <span style={{ color: '#64748b', marginLeft: 4 }}>less flood area</span>
-                  </div>
-                  <div>
-                    <span style={{ color: impact.areaSavedM2 > 0 ? goodColor : flatColor, fontWeight: 800 }}>
+                  {/* Hero metric: area saved is the number this plan should be judged
+                      on at a glance -- flood % is a derived, harder-to-parse figure
+                      shown small underneath instead of competing for attention. */}
+                  <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'center', gap: 8, flexWrap: 'wrap' }}>
+                    <span style={{ fontSize: 30, fontWeight: 900, color: goodColor, lineHeight: 1 }}>
                       {impact.areaSavedM2.toLocaleString()} m²
                     </span>
-                    <span style={{ color: '#64748b', marginLeft: 4 }}>area saved</span>
+                    <span style={{ color: '#64748b', fontSize: 13, fontWeight: 600 }}>area saved</span>
                   </div>
-                  <div>
-                    <span style={{ color: impact.roadsSaved > 0 ? goodColor : flatColor, fontWeight: 800 }}>
-                      {impact.roadsSaved}
-                    </span>
-                    <span style={{ color: '#64748b', marginLeft: 4 }}>roads saved</span>
-                  </div>
-                  <div>
-                    <span style={{ color: impact.buildingsSaved > 0 ? goodColor : flatColor, fontWeight: 800 }}>
-                      {impact.buildingsSaved}
-                    </span>
-                    <span style={{ color: '#64748b', marginLeft: 4 }}>buildings protected</span>
-                  </div>
+                  {impact.floodedPercentChange > 0 && (
+                    <div style={{ textAlign: 'center', fontSize: 10, color: '#94a3b8', marginTop: 3 }}>
+                      {impact.floodedPercentChange}% less flood area
+                    </div>
+                  )}
+
+                  {(showRoads || showBuildings || showHoldingTheLine) && (
+                    <div style={{
+                      display: 'flex',
+                      gap: 20,
+                      justifyContent: 'center',
+                      fontSize: 11,
+                      marginTop: 12,
+                      paddingTop: 12,
+                      borderTop: '1px solid #d1fae5',
+                    }}>
+                      {showRoads && (
+                        <div>
+                          <span style={{ color: goodColor, fontWeight: 800 }}>{impact.roadsSaved}</span>
+                          <span style={{ color: '#64748b', marginLeft: 4 }}>roads saved</span>
+                        </div>
+                      )}
+                      {showBuildings && (
+                        <div>
+                          <span style={{ color: goodColor, fontWeight: 800 }}>{impact.buildingsSaved}</span>
+                          <span style={{ color: '#64748b', marginLeft: 4 }}>buildings protected</span>
+                        </div>
+                      )}
+                      {showHoldingTheLine && (
+                        <div style={{ color: '#64748b', textAlign: 'center' }}>
+                          Protecting <span style={{ fontWeight: 700, color: '#0f172a' }}>{beforeRoads} road{beforeRoads === 1 ? '' : 's'}</span> and{' '}
+                          <span style={{ fontWeight: 700, color: '#0f172a' }}>{beforeBuildings} building{beforeBuildings === 1 ? '' : 's'}</span> from worsening conditions
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
               );
             })()}

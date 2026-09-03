@@ -21,7 +21,7 @@ const mono = IBM_Plex_Mono({
 
 export const metadata = {
   title: "Mohafiz — Pakistan's what if engine",
-  description: "Turn real flood data for Islamabad H-8/H-9 into a place-by-place response plan — before the water gets there.",
+  description: "Turn real flood data for Islamabad's Nullah Leh / Korang Nullah corridor into a place-by-place response plan — before the water gets there.",
 };
 
 export default function RootLayout({ children }) {

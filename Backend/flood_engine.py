@@ -926,8 +926,22 @@ def load_waterways():
 
 
 def get_total_waterway_length_m(waterways_geojson=None):
-    """Real total channel network length in metres, computed from the
-    actual waterway features. Cached after first call."""
+    """Real channel network length in metres, scoped to the DEM/study
+    catchment (get_dem_bounds()) -- the same ~50.3km2 area
+    get_catchment_area_m2() already treats as "the system" for the flood
+    volume itself. waterways.geojson covers a wider area than this DEM
+    (215 features, ~71.9km total, vs ~56km actually inside the study
+    bounds), so measuring a local action's benefit against the FULL file
+    was comparing it to a bigger catchment than the one the flood volume
+    is actually drawn from -- a real 300-500m treatment always looked
+    negligible next to 71.9km, even once correctly summed (see the
+    treated-length fix above this function). A segment counts if its
+    midpoint falls inside the DEM bounds -- an approximation, but the
+    same order-of-approximation the rest of this module already uses
+    (merge_intervals_and_sum, the anchor-point projection, etc.), and it
+    keeps the denominator consistent with the catchment the water itself
+    is modeled over. Cached after first call.
+    """
     cache_key = "_waterway_length_cache"
     if cache_key in globals() and globals()[cache_key] is not None:
         return globals()[cache_key]
@@ -935,6 +949,7 @@ def get_total_waterway_length_m(waterways_geojson=None):
     if waterways_geojson is None:
         waterways_geojson = load_waterways()
 
+    west, south, east, north = get_dem_bounds()
     total_m = 0.0
     lat_mid_rad = _math.radians(33.70)
     cos_lat = _math.cos(lat_mid_rad)
@@ -946,6 +961,9 @@ def get_total_waterway_length_m(waterways_geojson=None):
         for i in range(len(coords) - 1):
             lon1, lat1 = coords[i]
             lon2, lat2 = coords[i + 1]
+            mid_lon, mid_lat = (lon1 + lon2) / 2, (lat1 + lat2) / 2
+            if not (west <= mid_lon <= east and south <= mid_lat <= north):
+                continue
             dx = (lon2 - lon1) * 111320 * cos_lat
             dy = (lat2 - lat1) * 111320
             total_m += _math.sqrt(dx * dx + dy * dy)
@@ -968,6 +986,56 @@ def merge_intervals_and_sum(intervals):
         else:
             merged.append([start, end])
     return sum(end - start for start, end in merged)
+
+
+def _distance_along_waterway_to_point(lon, lat, target_waterway_id, waterways_geojson):
+    """Where along the given waterway feature this specific (lon, lat)
+    actually sits, in metres from the start of the line — i.e. the same
+    thing turf.nearestPointOnLine's "location" gives on the frontend.
+
+    Without this, every action on the same waterway feature (say, 5
+    separate Desilt Nullah clicks along the same mapped channel) had no
+    real position to go on and all got anchored at that channel's exact
+    midpoint (see compute_capacity_gain below) -- 5 actions 100m apart
+    then produced 5 near-identical intervals centered on the same point,
+    which merge_intervals_and_sum correctly merges as one overlapping
+    span. That's the right thing to do for genuinely overlapping
+    treatment, but these clicks weren't overlapping on the ground; they
+    just had no real position to prove it. Returns None if lon/lat are
+    unavailable or the feature isn't found, so callers can fall back to
+    the midpoint rather than crash.
+    """
+    lat_mid_rad = _math.radians(33.70)
+    cos_lat = _math.cos(lat_mid_rad)
+    m_per_deg_lat = 111320
+    m_per_deg_lon = 111320 * cos_lat
+    px, py = lon * m_per_deg_lon, lat * m_per_deg_lat
+
+    for feature in waterways_geojson.get("features", []):
+        fid = feature.get("id") or feature.get("properties", {}).get("id")
+        if fid != target_waterway_id:
+            continue
+        coords = feature["geometry"]["coordinates"]
+        cumulative = 0.0
+        best_dist = None
+        best_along = 0.0
+        for i in range(len(coords) - 1):
+            lon1, lat1 = coords[i]
+            lon2, lat2 = coords[i + 1]
+            x1, y1 = lon1 * m_per_deg_lon, lat1 * m_per_deg_lat
+            x2, y2 = lon2 * m_per_deg_lon, lat2 * m_per_deg_lat
+            dx, dy = x2 - x1, y2 - y1
+            seg_len = _math.sqrt(dx * dx + dy * dy)
+            t = 0.0 if seg_len == 0 else max(0.0, min(1.0, ((px - x1) * dx + (py - y1) * dy) / (seg_len * seg_len)))
+            proj_x, proj_y = x1 + t * dx, y1 + t * dy
+            dist = _math.sqrt((px - proj_x) ** 2 + (py - proj_y) ** 2)
+            along = cumulative + t * seg_len
+            if best_dist is None or dist < best_dist:
+                best_dist = dist
+                best_along = along
+            cumulative += seg_len
+        return best_along
+    return None
 
 
 def _position_along_waterway(target_waterway_id, waterways_geojson):
@@ -1012,6 +1080,8 @@ def compute_capacity_gain(capacity_actions, waterways_geojson=None,
         atype = action.get("type", "")
         params = action.get("params", {})
         wid = action.get("target_waterway_id")
+        a_lon = action.get("lon")
+        a_lat = action.get("lat")
 
         if atype == "greenBuffer":
             area = float(params.get("area", 0) or
@@ -1030,9 +1100,25 @@ def compute_capacity_gain(capacity_actions, waterways_geojson=None,
             intervals_by_type.setdefault(atype, []).append((0, length))
         else:
             total_w_len = cumulative[-1]
-            anchor_dist = total_w_len * 0.5
-            start_m = max(0, anchor_dist - length / 2)
-            end_m = min(total_w_len, anchor_dist + length / 2)
+            anchor_dist = None
+            if a_lon is not None and a_lat is not None:
+                anchor_dist = _distance_along_waterway_to_point(a_lon, a_lat, wid, waterways_geojson)
+            if anchor_dist is None:
+                # No click position to go on (older payload, or feature
+                # lookup failed) -- midpoint is a neutral fallback, but it's
+                # only ever right by coincidence.
+                anchor_dist = total_w_len * 0.5
+            # Not clamped to [0, total_w_len]. A real channel doesn't end
+            # just because this particular mapped LineString feature does
+            # -- that boundary is a GIS digitizing artifact (wherever OSM
+            # happened to split the way), not a real place water stops.
+            # Clamping here used to silently truncate the requested length
+            # whenever an action's anchor fell within length/2 of either
+            # end of its own feature -- a 100m desilt anchored right at a
+            # feature's start reported as 50m treated, for a reason that
+            # had nothing to do with the desilting itself.
+            start_m = anchor_dist - length / 2
+            end_m = anchor_dist + length / 2
             intervals_by_type.setdefault(atype, []).append((start_m, end_m))
 
     per_type_gain = {}
@@ -1150,7 +1236,7 @@ def compute_structural_volume_reduction(ponds, widen_actions, encroachments,
 
 
 # ---------------------------------------------------------------------
-# LOCAL PROTECTION — river overflow / dam release
+# LOCAL PROTECTION — all cause types
 # ---------------------------------------------------------------------
 def _distance_m_from_point(elevation_array, dem_bounds, center_lon, center_lat):
     """Real-world distance (metres) of every DEM pixel from a point."""
@@ -1194,20 +1280,21 @@ def _distance_m_from_line(elevation_array, dem_bounds, line_coords):
 
 def apply_local_protection(elevation_array, dem_bounds, ponds, widen_actions, encroachments):
     """
-    LOCAL PROTECTION MODEL for level-driven floods (river overflow, dam
-    release).
+    LOCAL PROTECTION MODEL — applied for every cause type.
 
     A retention pond or a widened 50m channel section cannot lower an
-    entire river's flood stage — that water is arriving from far outside
-    this DEM. What it CAN honestly do is intercept the water that would
+    entire basin's flood stage — river/dam water arrives from far outside
+    this DEM, and even rainfall/drainage-failure runoff is caught across a
+    catchment orders of magnitude bigger than one local measure. What a
+    structural action CAN honestly do is intercept the water that would
     otherwise reach ITS OWN immediate surroundings before that water adds
     to local flood depth there. We model that as a raised "effective
     ground" covering the intervention's real local service area, sized so
     the total volume it represents matches the actual intercepted volume
     computed in _pond_volume_m3 / _widen_volume_m3 / _encroachment_volume_m3
     — the same physics, just spent locally instead of diluted across the
-    whole study area (which is what made every action look like it did
-    nothing).
+    whole study area (which is what made every structural action look
+    like it did nothing, regardless of cause type).
 
     Returns a per-pixel metres-of-protection array, meant to be ADDED to
     the modified elevation array before computing the "after" flood extent

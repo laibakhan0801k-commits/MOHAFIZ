@@ -141,6 +141,29 @@ export default function FloodMap() {
   const [floodError, setFloodError] = useState(null);
   const [floodResult, setFloodResult] = useState(null);
   const sentParamsRef = useRef(null);
+  // animateFlood below is a plain async loop with no ties to React's
+  // lifecycle — navigating to /plan mid-animation (router.push, not a
+  // page reload) unmounts this component but does NOT stop that loop:
+  // it keeps calling addLayer/setPaintProperty on this now-orphaned map
+  // every ~550ms, throwing ("Cannot add layer ... before non-existing
+  // layer") once an earlier frame has already torn a layer down, and
+  // keeping its WebGL context alive and repainting in the background.
+  // That leftover work was stalling the event loop enough to make clicks
+  // on the /plan page's own (separate) map intermittently get dropped or
+  // misread — this flag lets the loop notice it should stop.
+  const cancelledRef = useRef(false);
+  useEffect(() => {
+    // Reset on every EFFECTIVE mount, not just once at ref-creation time.
+    // React's Strict Mode (dev only) intentionally mounts, cleans up, and
+    // re-mounts every effect once to surface exactly this class of bug --
+    // without this reset, that synthetic cleanup permanently flipped
+    // cancelledRef to true before the component was ever really used,
+    // silently disabling the entire flood animation (including the layers
+    // that draw the flood overlay and cut roads) for the rest of the
+    // page's life.
+    cancelledRef.current = false;
+    return function () { cancelledRef.current = true; };
+  }, []);
 
   useEffect(() => {
     const token = localStorage.getItem('mohafiz_token');
@@ -189,6 +212,16 @@ export default function FloodMap() {
     });
 
     mapRef.current.addControl(new maplibregl.NavigationControl({ visualizePitch: true }));
+
+    // See the matching comment in PlanWorkspace.js -- maplibre caches this
+    // container's size at creation time and never re-checks it, so any
+    // later resize (scrollbar appearing, window resize, browser zoom)
+    // leaves every click converted through a stale transform until
+    // something else (e.g. zooming) forces a recompute as a side effect.
+    const mapResizeObserver = new ResizeObserver(function () {
+      if (mapRef.current) mapRef.current.resize();
+    });
+    mapResizeObserver.observe(mapContainer.current);
 
     mapRef.current.on('load', async () => {
       try {
@@ -491,6 +524,8 @@ export default function FloodMap() {
         setStatus('ERROR: ' + err.message);
       }
     });
+
+    return function () { mapResizeObserver.disconnect(); };
   }, []);
 
   function applyFrame(frame, bounds) {
@@ -561,9 +596,11 @@ export default function FloodMap() {
 
   async function animateFlood(data) {
     for (const frame of data.frames) {
+      if (cancelledRef.current) return;
       applyFrame(frame, data.flood_image_bounds);
       await new Promise((r) => setTimeout(r, 550));
     }
+    if (cancelledRef.current) return;
     applyFinalRoads(data);
   }
 
@@ -876,7 +913,8 @@ export default function FloodMap() {
           bottom: 16,
           right: 16,
           zIndex: 999,
-          background: '#ffffff',
+          background: '#0A3D37',
+          border: '1px solid #3E5C56',
           borderRadius: '20px',
           boxShadow: '0 10px 40px rgba(0,0,0,0.35)',
           padding: '18px',
@@ -886,10 +924,10 @@ export default function FloodMap() {
           fontFamily: 'system-ui, sans-serif',
         }}
       >
-        <div style={{ fontSize: '16px', fontWeight: 800, color: '#0f172a', marginBottom: '2px' }}>
+        <div style={{ fontSize: '16px', fontWeight: 800, color: '#F2F8F5', marginBottom: '2px' }}>
           🌊 Flood Scenario
         </div>
-        <div style={{ fontSize: '12px', color: '#64748b', marginBottom: '14px' }}>
+        <div style={{ fontSize: '12px', color: '#DCEFE9', marginBottom: '14px' }}>
           Pick a cause, set the numbers, run the simulation
         </div>
 
@@ -903,15 +941,15 @@ export default function FloodMap() {
                 style={{
                   padding: '10px 8px',
                   borderRadius: '14px',
-                  border: active ? `2px solid ${cause.color}` : '2px solid #e2e8f0',
-                  background: active ? cause.colorLight : '#f8fafc',
+                  border: active ? `2px solid ${cause.color}` : '2px solid #3E5C56',
+                  background: active ? cause.colorLight : '#062D29',
                   cursor: 'pointer',
                   textAlign: 'center',
                   transition: 'all 0.15s',
                 }}
               >
                 <div style={{ fontSize: '22px', marginBottom: '2px' }}>{cause.emoji}</div>
-                <div style={{ fontSize: '11px', fontWeight: 700, color: active ? cause.color : '#475569' }}>
+                <div style={{ fontSize: '11px', fontWeight: 700, color: active ? cause.color : '#DCEFE9' }}>
                   {cause.label}
                 </div>
               </button>
@@ -928,7 +966,7 @@ export default function FloodMap() {
                   justifyContent: 'space-between',
                   fontSize: '12px',
                   fontWeight: 600,
-                  color: '#334155',
+                  color: '#F2F8F5',
                   marginBottom: '4px',
                 }}
               >
@@ -947,7 +985,7 @@ export default function FloodMap() {
                 style={{ width: '100%', accentColor: activeCause.color, cursor: 'pointer' }}
               />
               {field.helperText && (
-                <div style={{ fontSize: '11px', color: '#64748b', marginTop: '2px' }}>
+                <div style={{ fontSize: '11px', color: '#DCEFE9', marginTop: '2px' }}>
                   {field.helperText(causeParams[causeType][field.key])}
                 </div>
               )}
@@ -963,12 +1001,12 @@ export default function FloodMap() {
             padding: '12px',
             borderRadius: '14px',
             border: 'none',
-            background: floodLoading ? '#94a3b8' : `linear-gradient(135deg, ${activeCause.color}, ${activeCause.color}cc)`,
-            color: 'white',
+            background: floodLoading ? '#3E5C56' : '#C7FF28',
+            color: floodLoading ? '#DCEFE9' : '#062D29',
             fontWeight: 800,
             fontSize: '14px',
             cursor: floodLoading ? 'default' : 'pointer',
-            boxShadow: floodLoading ? 'none' : `0 6px 16px ${activeCause.color}55`,
+            boxShadow: floodLoading ? 'none' : '0 6px 16px rgba(199,255,40,0.35)',
           }}
         >
           {floodLoading ? '🌊 Water rising...' : '▶ Run Flood Simulation'}
@@ -1050,15 +1088,15 @@ export default function FloodMap() {
               padding: '12px',
               borderRadius: '14px',
               border: 'none',
-              background: 'linear-gradient(135deg, #dc2626, #b91c1c)',
-              color: 'white',
+              background: '#D8C3A5',
+              color: '#062D29',
               fontWeight: 800,
               fontSize: '14px',
               cursor: 'pointer',
-              boxShadow: '0 6px 16px #dc262655',
+              boxShadow: '0 6px 16px rgba(216,195,165,0.35)',
             }}
           >
-            🗺️ Open Response Plan →
+            Open Plan
           </button>
         )}
         <div
@@ -1068,19 +1106,19 @@ export default function FloodMap() {
             alignItems: 'center',
             justifyContent: 'space-between',
             fontSize: '10px',
-            color: '#94a3b8',
+            color: '#DCEFE9',
           }}
         >
           <span>{user?.email ? `signed in as ${user.email}` : 'not signed in'}</span>
           <button
             onClick={handleLogout}
             style={{
-              border: '1px solid #e2e8f0',
+              border: '1px solid #3E5C56',
               borderRadius: '6px',
               padding: '3px 8px',
               fontSize: '10px',
               fontWeight: 600,
-              color: '#64748b',
+              color: '#F2F8F5',
               background: 'transparent',
               cursor: 'pointer',
             }}
