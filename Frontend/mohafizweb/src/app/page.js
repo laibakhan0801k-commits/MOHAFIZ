@@ -13,41 +13,47 @@ const SCENARIOS = [
   {
     name: "River Overflow",
     line: "Models the nullah breaching its banks, using real elevation data.",
-    image: "https://images.unsplash.com/photo-1783103957862-06b844e495f2?w=600&q=80&auto=format&fit=crop",
+    image: "https://images.unsplash.com/photo-1604275689235-fdc521556c16?w=900&q=80&auto=format&fit=crop",
   },
   {
     name: "Rainfall",
     line: "Flash flooding when monsoon rain outpaces urban drainage.",
-    image: "https://images.unsplash.com/photo-1759299983355-6ddc9a9d8ba5?w=600&q=80&auto=format&fit=crop",
+    image: "https://images.unsplash.com/photo-1534862262637-373c120dcbcc?w=900&q=80&auto=format&fit=crop",
   },
   {
     name: "Drainage Failure",
     line: "Blocked drains and encroached nullahs — the most common local cause.",
-    image: "https://images.unsplash.com/photo-1745265797120-7c9718c72659?w=600&q=80&auto=format&fit=crop",
+    image: "https://images.unsplash.com/photo-1576749288264-207936efb479?w=900&q=80&auto=format&fit=crop",
   },
   {
     name: "Dam Release",
     line: "Rawal Dam's spillway releases into Korang Nullah, with real advance warning.",
-    image: "https://images.unsplash.com/photo-1639237046487-1a2892330b9c?w=600&q=80&auto=format&fit=crop",
+    image: "https://images.unsplash.com/photo-1639237046487-1a2892330b9c?w=900&q=80&auto=format&fit=crop",
   },
 ];
 
 const WHAT_IF_STEPS = [
   {
     n: "01",
-    title: "See the shape of risk",
-    body: "Translate a complex basin into a picture people can read together.",
+    title: "See the real flood extent",
+    body: "Real elevation data, not an illustration.",
   },
   {
     n: "02",
-    title: "Find the decision point",
-    body: "Understand which small action gives your family or district more room.",
+    title: "Find what actually helps",
+    body: "Simulate a real fix, before and after.",
   },
   {
     n: "03",
-    title: "Move with confidence",
-    body: "Share a clear next step with the people who need to act.",
+    title: "Save your plan",
+    body: "Keep it in your account — revisit or compare anytime.",
   },
+];
+
+const SAMPLE_QUESTIONS = [
+  "What if it rains 50mm/hr?",
+  "Which roads flood if the dam releases?",
+  "What prevention would protect this area?",
 ];
 
 // Real numbers, computed by actually running a River Overflow scenario
@@ -110,7 +116,8 @@ export default function Home() {
               <span className="block text-flow">Until it&rsquo;s tested.</span>
             </h1>
             <p className="font-body text-lg mt-6 max-w-md opacity-80">
-              Run real flood scenarios for Islamabad H-8/H-9, draw your
+              Run real flood scenarios for Islamabad&rsquo;s Nullah Leh /
+              Korang Nullah corridor — Saidpur to Blue Area — draw your
               response plan, and see the risk change before the water gets
               there.
             </p>
@@ -140,17 +147,17 @@ export default function Home() {
               return (
                 <div
                   key={s.name}
-                  className="mh-card mh-fade-in group overflow-hidden border-2 border-mint/30 hover:border-flow rounded-xl bg-surface"
+                  className="mh-card mh-fade-in group border-2 border-mint/30 hover:border-flow rounded-xl bg-surface p-3"
                 >
-                  <div className="relative h-32 overflow-hidden">
+                  <div className="relative h-32 overflow-hidden rounded-lg border border-line">
                     <img
                       src={s.image}
-                      alt=""
+                      alt={s.name}
                       className="w-full h-full object-cover transition-transform duration-500 ease-out group-hover:scale-110"
                     />
-                    <div className="absolute inset-0 bg-gradient-to-t from-surface via-surface/10 to-transparent" />
+                    <div className="absolute inset-0 bg-gradient-to-t from-surface/70 via-transparent to-transparent" />
                   </div>
-                  <div className="px-5 py-4">
+                  <div className="pt-4">
                     <div className="flex items-center gap-2">
                       <span className="w-3 h-3 rounded-full bg-line group-hover:bg-flow transition-colors" />
                       <h3 className="font-display text-lg text-paper">{s.name}</h3>
@@ -160,6 +167,62 @@ export default function Home() {
                 </div>
               );
             })}
+          </div>
+        </div>
+      </section>
+
+      {/* Start with "what if" — reframed under a stronger header */}
+      <section className="bg-ink px-6 py-16">
+        <div className="max-w-5xl mx-auto">
+          <h2 className="font-display text-3xl sm:text-4xl font-bold text-paper mb-10">
+            Ask a real question. Get a real simulation.
+          </h2>
+
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-14 items-start">
+            <div className="mh-card mh-fade-in bg-surface text-paper rounded-2xl px-6 py-6">
+              <span className="inline-block font-body text-[10px] font-semibold tracking-wide uppercase bg-paper/10 text-paper/70 rounded-full px-3 py-1">
+                A question for Mohafiz
+              </span>
+              <div className="flex flex-col gap-3 mt-5">
+                {SAMPLE_QUESTIONS.map(function (q, i) {
+                  return (
+                    <span
+                      key={q}
+                      className={
+                        "font-body text-sm rounded-full px-5 py-3 " +
+                        (i === 0
+                          ? "bg-flow text-ink font-semibold"
+                          : "bg-paper/10 text-paper/70")
+                      }
+                    >
+                      {q}
+                    </span>
+                  );
+                })}
+              </div>
+              <Link
+                href="/how-it-works"
+                className="inline-block mt-5 font-body text-sm text-flow hover:opacity-80 transition"
+              >
+                See a grounded answer →
+              </Link>
+            </div>
+
+            <div className="lg:border-l lg:border-line lg:pl-14">
+              <div className="space-y-6">
+                {WHAT_IF_STEPS.map(function (step) {
+                  return (
+                    <div key={step.n} className="mh-fade-in flex gap-4">
+                      <span className="font-mono text-sm font-semibold text-flow">{step.n}</span>
+                      <div>
+                        <h4 className="font-display text-base font-bold text-paper">{step.title}</h4>
+                        <p className="font-body text-sm text-mint mt-1">{step.body}</p>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
           </div>
         </div>
       </section>
@@ -216,64 +279,6 @@ export default function Home() {
           <Link href="/how-it-works" className="inline-block mt-6 font-body text-sm text-flow underline">
             Read the full walkthrough
           </Link>
-        </div>
-      </section>
-
-      {/* Start with "what if" — reframed under a stronger header */}
-      <section className="bg-ink px-6 py-16">
-        <div className="max-w-5xl mx-auto">
-          <div className="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-3 mb-8">
-            <div>
-              <div className="font-body text-xs font-semibold tracking-wide text-flow uppercase">
-                <span className="inline-block w-1.5 h-1.5 rounded-full bg-flow mr-2 align-middle" />
-                Try the thinking
-              </div>
-              <h2 className="font-display text-3xl text-paper mt-2">From guesswork to a tested plan.</h2>
-            </div>
-            <p className="font-body text-sm text-mint max-w-xs sm:text-right">
-              Every useful plan begins somewhere specific.
-            </p>
-          </div>
-
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 items-center">
-            <div className="mh-card mh-fade-in bg-surface text-paper rounded-2xl px-6 py-6">
-              <span className="inline-block font-body text-[10px] font-semibold tracking-wide uppercase bg-paper/10 text-paper/70 rounded-full px-3 py-1">
-                A question for Mohafiz
-              </span>
-              <h3 className="font-display text-xl mt-4">What if the nullah rises 1 metre?</h3>
-              <div className="flex flex-wrap gap-2 mt-5">
-                <span className="font-body text-xs bg-flow text-ink rounded-full px-3 py-1.5">
-                  What if the nullah rises 1 metre?
-                </span>
-                <span className="font-body text-xs bg-paper/10 text-paper/80 rounded-full px-3 py-1.5">
-                  Which roads stay open near H-9?
-                </span>
-                <span className="font-body text-xs bg-paper/10 text-paper/80 rounded-full px-3 py-1.5">
-                  Where should our community shelter?
-                </span>
-              </div>
-              <Link
-                href="/how-it-works"
-                className="inline-block mt-5 font-body text-sm text-flow hover:opacity-80 transition"
-              >
-                See a grounded answer →
-              </Link>
-            </div>
-
-            <div className="space-y-6">
-              {WHAT_IF_STEPS.map(function (step) {
-                return (
-                  <div key={step.n} className="mh-fade-in flex gap-4">
-                    <span className="font-mono text-sm text-flow">{step.n}</span>
-                    <div>
-                      <h4 className="font-display text-base text-paper">{step.title}</h4>
-                      <p className="font-body text-sm text-mint mt-1">{step.body}</p>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
         </div>
       </section>
 

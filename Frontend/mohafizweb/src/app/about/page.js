@@ -125,29 +125,29 @@ const SECTIONS = [
     title: "Why Mohafiz exists",
     icon: "causes",
     iconColor: "stroke-flow",
-    image: "https://images.unsplash.com/photo-1657579386421-98ca5462e3cf?w=800&q=80&auto=format&fit=crop",
-    body: "Islamabad and Rawalpindi don't flood for one reason — they flood for four: a river breaching its banks, monsoon rain outrunning the drains, storm drains blocked by decades of encroachment and waste, and scheduled water releases from Rawal Dam into Korang Nullah. Mohafiz exists because most flood-planning tools model only one of these, if any at all.",
+    image: "https://images.unsplash.com/photo-1761252987116-a3e993bd23e9?w=900&q=80&auto=format&fit=crop",
+    body: "Islamabad and Rawalpindi flood for four different reasons — a river breaching its banks, monsoon rain outrunning the drains, storm drains blocked by encroachment, and scheduled Rawal Dam releases. Most tools model only one.",
   },
   {
     title: "What grounds it",
     icon: "layers",
     iconColor: "stroke-flow",
-    image: "https://images.unsplash.com/photo-1769184615939-00913575f62a?w=800&q=80&auto=format&fit=crop",
-    body: "Every scenario in Mohafiz is built on real inputs: elevation data for the H-8/H-9 sector, the actual road network, Pakistan Meteorological Department's own rainfall intensity bands, and documented statements from WASA and the CDA on what causes local drainage failure. The dam release scenario mirrors Rawal Dam's real, publicly logged spillway protocol — including the siren warnings issued before every release.",
+    image: "https://images.unsplash.com/photo-1441644599508-24ae08965c5c?w=900&q=80&auto=format&fit=crop",
+    body: "Every scenario runs on real inputs: elevation data for the Nullah Leh / Korang Nullah corridor, the actual road network, PMD rainfall bands, and documented WASA/CDA drainage reports. The dam scenario mirrors Rawal Dam's real spillway protocol, sirens included.",
   },
   {
     title: "Limitations",
     icon: "alert",
     iconColor: "stroke-mint",
-    image: "https://images.unsplash.com/photo-1648128827832-1e8a90442b07?w=800&q=80&auto=format&fit=crop",
-    body: "Mohafiz is a planning and simulation tool, not an official emergency alert system. It's built to help teams think through response and prevention plans in advance — not to replace guidance from NDMA, WASA, or local authorities during an actual flood.",
+    image: "https://images.unsplash.com/photo-1755052411125-42bbfd87588b?w=900&q=80&auto=format&fit=crop",
+    body: "Mohafiz is a planning and simulation tool, not an emergency alert system. Use it to prepare response plans in advance — not as a replacement for NDMA, WASA, or local authority guidance during an actual flood.",
   },
   {
     title: "Data sources",
     icon: "sources",
     iconColor: "stroke-mint",
-    image: "https://images.unsplash.com/photo-1583521214690-73421a1829a9?w=800&q=80&auto=format&fit=crop",
-    body: "Elevation / DEM data, the OpenStreetMap road network, PMD rainfall classifications, and public reporting on Rawal Dam operations. Exact source links to be added here.",
+    image: "https://images.unsplash.com/photo-1756093158082-37e567772896?w=900&q=80&auto=format&fit=crop",
+    body: "Elevation (DEM) data, the OpenStreetMap road network, PMD rainfall classifications, and public reporting on Rawal Dam operations. Source links coming soon.",
   },
 ];
 
@@ -184,17 +184,17 @@ export default function AboutPage() {
             return (
               <div
                 key={s.title}
-                className="mh-card mh-fade-in group bg-surface rounded-xl overflow-hidden border border-line hover:border-flow"
+                className="mh-card mh-fade-in group bg-surface rounded-xl border border-line hover:border-flow p-4"
               >
-                <div className="relative h-32 overflow-hidden">
+                <div className="relative h-40 overflow-hidden rounded-lg border border-line">
                   <img
                     src={s.image}
-                    alt=""
+                    alt={s.title}
                     className="w-full h-full object-cover transition-transform duration-500 ease-out group-hover:scale-110"
                   />
-                  <div className="absolute inset-0 bg-gradient-to-t from-surface via-surface/10 to-transparent" />
+                  <div className="absolute inset-0 bg-gradient-to-t from-surface/70 via-transparent to-transparent" />
                 </div>
-                <div className="px-5 py-5">
+                <div className="pt-5">
                   <SectionIcon name={s.icon} colorClass={s.iconColor} />
                   <h2 className="font-display text-lg text-paper mt-3">{s.title}</h2>
                   <p className="font-body text-sm leading-relaxed text-mint mt-2">{s.body}</p>

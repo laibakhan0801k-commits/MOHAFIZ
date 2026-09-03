@@ -236,7 +236,8 @@ export default function HowItWorksPage() {
                 Drainage Failure, or Dam Release — then set a severity level.
                 For Rainfall, severity follows Pakistan&rsquo;s own PMD
                 intensity bands, from light to extremely heavy. Each scenario
-                runs against real elevation and road data for H-8/H-9.
+                runs against real elevation and road data for the Nullah
+                Leh / Korang Nullah corridor, Islamabad.
               </p>
             </div>
 
