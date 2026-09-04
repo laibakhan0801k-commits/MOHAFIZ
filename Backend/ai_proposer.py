@@ -12,6 +12,7 @@ guess.
 """
 import math
 import json
+import logging
 
 import flood_engine
 import road_flooding
@@ -19,6 +20,8 @@ import prevention_constants as C
 import prevention_validation as V
 import ai_candidates as AC
 import ai_llm
+
+logger = logging.getLogger(__name__)
 
 
 def decide_action_type_for_zone(cause_type, already_tried=None):
@@ -228,6 +231,12 @@ def run_prevention_proposer(priority_zones, cause_type, elevation, dem_bounds, w
     # not invented client-side.
     trace = []
 
+    # Last real LLM failure seen, so a run that proposes nothing purely
+    # because the model was unreachable can report that instead of
+    # looking like a successful empty result. See the check after the
+    # zone loop.
+    llm_error = None
+
     # Computed ONCE -- doesn't depend on any candidate/action, so every
     # zone/attempt below reuses it instead of recomputing the same
     # before-state repeatedly.
@@ -272,6 +281,11 @@ def run_prevention_proposer(priority_zones, cause_type, elevation, dem_bounds, w
                     llm_result = call_proposer_llm(candidates, zone, action_type, rejection_context, deadline=deadline)
                 except Exception as e:
                     trace.append({"event": "llm_unreachable", "zone_index": zone_index, "action_type": action_type, "detail": str(e)[:200]})
+                    logger.warning(
+                        "proposer: LLM unreachable for zone %d action_type %s: %s: %s",
+                        zone_index, action_type, type(e).__name__, e,
+                    )
+                    llm_error = e
                     break  # LLM totally unreachable for this action type -- try the next one
 
                 candidate = next((c for c in candidates if c["id"] == llm_result.get("candidate_id")), None)
@@ -324,5 +338,16 @@ def run_prevention_proposer(priority_zones, cause_type, elevation, dem_bounds, w
             })
         else:
             trace.append({"event": "zone_skipped", "zone_index": zone_index})
+
+    # Zero proposals is a legitimate, meaningful answer when the real
+    # placement rules rejected every candidate (or none existed) -- the
+    # trace says exactly which rule, and that still returns 200. It is
+    # NOT a legitimate answer when the model was simply never reachable:
+    # that used to surface as a successful "0 proposals" response,
+    # indistinguishable from "your plan already covers everything". If
+    # nothing was proposed AND an LLM call actually failed, re-raise so
+    # the endpoint reports the real cause.
+    if not proposals and llm_error is not None:
+        raise llm_error
 
     return {"proposals": proposals, "trace": trace}

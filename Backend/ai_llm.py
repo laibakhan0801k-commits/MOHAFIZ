@@ -50,6 +50,31 @@ def strip_markdown_fences(text):
     return t.strip()
 
 
+# qwen/qwen3.6-27b lists "reasoning" in its Groq supported_features, and
+# reasoning tokens are charged against the SAME completion budget as the
+# answer. With no cap set, a real hazard-analyst call came back as
+# groq.BadRequestError code=json_validate_failed with
+#   failed_generation: "max completion tokens reached before generating a
+#   valid document"
+# -- the model spent its whole completion allowance thinking and never
+# closed the JSON object. Every zone call failed that way, every retry,
+# for every scenario, which is what produced the permanent "0 priority
+# zones identified" (ai_hazard_analyst swallowed each failure).
+#
+# reasoning_effort="none" is verified accepted by this model: the same
+# real prompt shape returns valid JSON in 20 completion tokens with it,
+# versus exhausting the budget without it. It also stops the runaway
+# token burn that was draining the 200k tokens/day quota -- 12 doomed
+# calls per request (3 zones x 4 attempts), each spending a full
+# reasoning budget, is how a day's allowance disappeared.
+REASONING_EFFORT = "none"
+
+# Generous relative to the real payload (a single zone object is well
+# under 200 tokens) but far below the model's 16384 ceiling, so a
+# runaway generation fails fast instead of burning quota.
+MAX_COMPLETION_TOKENS = 2048
+
+
 def call_llm_json(prompt, validate_fn=None, max_retries=2, timeout_s=15, temperature=0.3, deadline=None):
     """
     Calls MODEL with JSON-object mode, retrying (up to max_retries
@@ -95,6 +120,8 @@ def call_llm_json(prompt, validate_fn=None, max_retries=2, timeout_s=15, tempera
                 response_format={"type": "json_object"},
                 temperature=temperature,
                 timeout=timeout_s,
+                reasoning_effort=REASONING_EFFORT,
+                max_completion_tokens=MAX_COMPLETION_TOKENS,
             )
             raw = response.choices[0].message.content
             cleaned = strip_markdown_fences(raw)
@@ -102,6 +129,14 @@ def call_llm_json(prompt, validate_fn=None, max_retries=2, timeout_s=15, tempera
             if validate_fn is not None:
                 validate_fn(parsed)
             return parsed
+        except groq_module.RateLimitError:
+            # A quota/rate-limit rejection cannot succeed on an immediate
+            # retry -- Groq's own message quotes a reset measured in
+            # minutes, far beyond this loop. Retrying it 3 more times
+            # only burns the caller's deadline and delays the real
+            # message reaching the user, so fail fast and let the
+            # endpoint surface it as a 429.
+            raise
         except (groq_module.GroqError, json.JSONDecodeError) as e:
             last_error = e
             continue

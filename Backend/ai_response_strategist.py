@@ -17,6 +17,9 @@ import ai_response_candidates as RC
 import response_validation as RV
 from response_validation import DEFAULT_WARNING_RADIUS_M, DEFAULT_EVAC_RADIUS_M
 import ai_llm
+import logging
+
+logger = logging.getLogger(__name__)
 
 # Fixed try-order for river_overflow -- evacuationZone first because
 # reliefMedicalPost's real validation REQUIRES an existing evacuation
@@ -128,6 +131,10 @@ def run_response_strategist(uncovered_zones, cause_type, ctx, max_proposals=4, m
     proposals = []
     trace = []
     existing_actions = []  # for the overlap filter, grows as zones succeed
+    # See the check after the zone loop -- distinguishes "the real rules
+    # rejected everything" (a genuine 200 answer) from "the model was
+    # never reachable" (an error that used to masquerade as one).
+    llm_error = None
 
     for zone_index, zone in enumerate(uncovered_zones):
         if len(proposals) >= max_proposals:
@@ -168,6 +175,11 @@ def run_response_strategist(uncovered_zones, cause_type, ctx, max_proposals=4, m
                     llm_result = call_strategist_llm(candidates, zone, action_type, rejection_context, deadline=deadline)
                 except Exception as e:
                     trace.append({"event": "llm_unreachable", "zone_index": zone_index, "action_type": action_type, "detail": str(e)[:200]})
+                    logger.warning(
+                        "strategist: LLM unreachable for zone %d action_type %s: %s: %s",
+                        zone_index, action_type, type(e).__name__, e,
+                    )
+                    llm_error = e
                     break
 
                 candidate = next((c for c in candidates if c["id"] == llm_result.get("candidate_id")), None)
@@ -214,5 +226,8 @@ def run_response_strategist(uncovered_zones, cause_type, ctx, max_proposals=4, m
                 ctx["existing_closed_roads"] = list(ctx.get("existing_closed_roads") or []) + [{"lon": loc["lon"], "lat": loc["lat"]}]
         else:
             trace.append({"event": "zone_skipped", "zone_index": zone_index})
+
+    if not proposals and llm_error is not None:
+        raise llm_error
 
     return {"proposals": proposals, "trace": trace}

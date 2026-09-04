@@ -33,6 +33,25 @@ class Scenario(Base):
     flooded_percent = Column(Float, nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
+
+class SavedPlan(Base):
+    __tablename__ = "saved_plans"
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(String, ForeignKey("users.id"), nullable=False)
+    plan_type = Column(String, nullable=False)  # "response" | "prevention"
+    # JSON strings, same convention as Scenario.input_params above --
+    # scenario_snapshot: whatever identifies the simulation run this plan
+    # was built against (cause_type, water_level_m, params); actions:
+    # the real placed markers/embankments/closedRoads at save time;
+    # report_summary: the report/impact result shown when the user
+    # generated it (Print/Download/Impact Report), so the saved entry
+    # reflects what they actually saw, not a re-derived guess.
+    scenario_snapshot = Column(String, nullable=False)
+    actions = Column(String, nullable=False)
+    report_summary = Column(String, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
 # This line actually creates the tables in Supabase if they don't exist yet
 Base.metadata.create_all(bind=engine)
-print("Users + Scenarios tables created (or already exist)")
+print("Users + Scenarios + SavedPlans tables created (or already exist)")

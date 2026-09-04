@@ -71,7 +71,7 @@ const SAMPLE_QUESTIONS = [
 // Report. Not invented.
 const PREVENTION_EXAMPLE = {
   before: { floodedPercent: 0.72, avgDepthM: 2.53 },
-  after: { floodedPercent: 0.71, avgDepthM: 2.49 },
+  after: { floodedPercent: 0.69, avgDepthM: 2.49 },
   treatedLengthM: 130,
   areaSavedM2: 4773,
   volumeStoredM3: 30000,

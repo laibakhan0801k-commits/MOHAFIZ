@@ -183,23 +183,40 @@ export default function HeroFloodPreview() {
       <div className="pointer-events-none absolute bottom-3 left-3 w-5 h-5 border-b-2 border-l-2 border-flow/70 rounded-bl-md" />
       <div className="pointer-events-none absolute bottom-3 right-3 w-5 h-5 border-b-2 border-r-2 border-flow/70 rounded-br-md" />
 
+      {/* Illustrative concept visual, layered over the real map above --
+          not a claimed screenshot of live Mohafiz output (the real map +
+          the real stat chips below are that). The image is vertically
+          centered in the box and the chips only occupy narrow top/bottom
+          bands (~24-63px and ~497-535px from the box edge), so at this
+          aspect ratio the image clears those bands vertically well before
+          it would ever reach the chips' horizontal extent -- padding here
+          is the real measured vertical clearance (with a small safety
+          margin), verified via a real bounding-box overlap check. */}
+      <div className="pointer-events-none absolute inset-0 flex items-center justify-center px-6 py-[72px]">
+        <img
+          src="/images/map.jpg"
+          alt="Illustrative 3D concept view of a flood dashboard, showing flood depth, risk level, and evacuation route indicators over a neighbourhood"
+          className="max-w-full max-h-full w-auto h-auto object-contain drop-shadow-2xl"
+        />
+      </div>
+
       {/* Real, genuine values from the captured run above — not placeholder text. */}
       <div className="pointer-events-none absolute inset-0">
-        <div className="absolute top-6 left-6 bg-ink/80 backdrop-blur border border-line/60 rounded-lg px-3 py-2">
-          <div className="font-mono text-[10px] tracking-wide text-mint">WATER LEVEL</div>
-          <div className="font-mono text-lg text-paper">{SCENARIO_STATS.waterLevelM}M</div>
+        <div className="absolute top-6 left-6 bg-ink/80 backdrop-blur border border-line/60 rounded-lg px-1 py-0.5">
+          <div className="font-mono text-[8px] text-mint">WATER LEVEL</div>
+          <div className="font-mono text-sm text-paper">{SCENARIO_STATS.waterLevelM}M</div>
         </div>
-        <div className="absolute top-6 right-6 bg-ink/80 backdrop-blur border border-alert/50 rounded-lg px-3 py-2">
-          <div className="font-mono text-[10px] tracking-wide text-mint">FLOODED AREA</div>
-          <div className="font-mono text-lg text-alert">{SCENARIO_STATS.floodedPercent}%</div>
+        <div className="absolute top-6 right-6 bg-ink/80 backdrop-blur border border-alert/50 rounded-lg px-1 py-0.5">
+          <div className="font-mono text-[8px] text-mint">FLOODED AREA</div>
+          <div className="font-mono text-sm text-alert">{SCENARIO_STATS.floodedPercent}%</div>
         </div>
-        <div className="absolute bottom-6 left-6 bg-ink/80 backdrop-blur border border-line/60 rounded-lg px-3 py-2">
-          <div className="font-mono text-[10px] tracking-wide text-mint">AVG DEPTH</div>
-          <div className="font-mono text-lg text-paper">{SCENARIO_STATS.avgDepthM}M</div>
+        <div className="absolute bottom-6 left-6 bg-ink/80 backdrop-blur border border-line/60 rounded-lg px-1 py-0.5">
+          <div className="font-mono text-[8px] text-mint">AVG DEPTH</div>
+          <div className="font-mono text-sm text-paper">{SCENARIO_STATS.avgDepthM}M</div>
         </div>
-        <div className="absolute bottom-6 right-6 bg-ink/80 backdrop-blur border border-alert/50 rounded-lg px-3 py-2">
-          <div className="font-mono text-[10px] tracking-wide text-mint">BUILDINGS AFFECTED</div>
-          <div className="font-mono text-lg text-alert">{SCENARIO_STATS.affectedBuildings}</div>
+        <div className="absolute bottom-6 right-6 bg-ink/80 backdrop-blur border border-alert/50 rounded-lg px-1 py-0.5">
+          <div className="font-mono text-[8px] text-mint">BUILDINGS AFFECTED</div>
+          <div className="font-mono text-sm text-alert">{SCENARIO_STATS.affectedBuildings}</div>
         </div>
         <div className="absolute top-6 left-1/2 -translate-x-1/2 font-mono text-[10px] tracking-wide text-mint/80 bg-ink/60 backdrop-blur px-3 py-1 rounded-full">
           RIVER OVERFLOW — REAL SIMULATION OUTPUT

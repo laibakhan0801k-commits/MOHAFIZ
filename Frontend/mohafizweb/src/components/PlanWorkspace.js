@@ -7333,6 +7333,46 @@ export default function PlanWorkspace() {
     return actions;
   }
 
+  // Saves this plan run to the user's account -- only when logged in
+  // (mohafiz_token present), fire-and-forget so it never blocks the
+  // report the user actually asked for. Same Bearer-token pattern
+  // Backend/main.py's get_current_user_id decodes (issued at /login),
+  // and the real placed markers/embankments/closedRoads at this exact
+  // moment -- not a re-derived guess.
+  function savePlanIfLoggedIn(planTypeToSave, reportSummary) {
+    var token = localStorage.getItem('mohafiz_token');
+    if (!token || !scenario) return;
+
+    var scenarioSnapshot = {
+      cause_type: (scenario.params && scenario.params.cause_type) || scenario.cause_type,
+      water_level_m: scenario.water_level_m,
+      params: (scenario.params && scenario.params.params) || null,
+    };
+
+    var actionsSnapshot = planTypeToSave === 'response'
+      ? {
+          markers: markers.filter(function (m) { return m.planType === 'response'; }),
+          closedRoads: closedRoads,
+        }
+      : {
+          markers: markers.filter(function (m) { return m.planType === 'prevention'; }),
+          embankments: embankments.filter(function (e) { return e.planType === 'prevention'; }),
+        };
+
+    fetch(API_URL + '/plans/save', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
+      body: JSON.stringify({
+        plan_type: planTypeToSave,
+        scenario_snapshot: scenarioSnapshot,
+        actions: actionsSnapshot,
+        report_summary: reportSummary || null,
+      }),
+    }).catch(function (err) {
+      console.error('Saving plan to account failed:', err);
+    });
+  }
+
   async function runPreventionSim() {
     setPreventionLoading(true);
     setPreventionError(null);
@@ -7357,6 +7397,7 @@ export default function PlanWorkspace() {
       var data = await res.json();
       if (!res.ok) throw new Error(data.detail || 'Simulation failed');
       setPreventionResult(data);
+      savePlanIfLoggedIn('prevention', data);
     } catch (err) {
       setPreventionError(err.message);
     } finally {
@@ -7733,6 +7774,7 @@ export default function PlanWorkspace() {
   function handlePrintReport() {
     const items = buildReportItems(markers, closedRoads);
     const counts = buildReportCounts(items);
+    savePlanIfLoggedIn('response', { counts: counts, itemCount: items.length });
     const html = buildReportHtml(scenario, items, counts);
     const w = window.open('', '_blank');
     if (!w) {
@@ -7754,6 +7796,7 @@ export default function PlanWorkspace() {
   function handleDownloadReportText() {
     const items = buildReportItems(markers, closedRoads);
     const counts = buildReportCounts(items);
+    savePlanIfLoggedIn('response', { counts: counts, itemCount: items.length });
     const text = buildReportText(scenario, items, counts);
     const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
     const url = URL.createObjectURL(blob);
@@ -7785,6 +7828,7 @@ export default function PlanWorkspace() {
           ? buildDamReleaseResponseImpact(scenario, geoData, responseMarkers)
           : buildRiverOverflowResponseImpact(scenario, geoData, responseMarkers, closedRoads);
     setResponseImpactResult(result);
+    savePlanIfLoggedIn('response', result);
   }
 
   if (!scenario) {
@@ -9717,10 +9761,15 @@ export default function PlanWorkspace() {
 
         {/* Live simulation metrics, overlaying the map frame's bottom
             edge -- every value below is the real current scenario output
-            (Backend/main.py's /flood response), not a placeholder. */}
+            (Backend/main.py's /flood response), not a placeholder. Left
+            offset clears the tool sidebar (viewport left:16, width:290,
+            so its right edge sits at ~306px; this bar's left is relative
+            to the map frame's own left:10 inset, so 312 - 10 = ~302px of
+            clearance plus a real gap) -- not just the bottom-left compass
+            badge, which the old left:68 only accounted for. */}
         <div
           style={{
-            position: 'absolute', left: 68, bottom: 14, right: 300, zIndex: 15,
+            position: 'absolute', left: 312, bottom: 14, right: 300, zIndex: 15,
             display: 'flex', gap: 8, overflowX: 'auto',
           }}
         >

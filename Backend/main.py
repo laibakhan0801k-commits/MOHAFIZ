@@ -1,18 +1,20 @@
 from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, EmailStr
 from typing import Optional
 from sqlalchemy.orm import Session
 from datetime import datetime, timedelta
 import bcrypt
-from jose import jwt
+from jose import jwt, JWTError
 import os
 import json
 import math
 import numpy as np
+import groq
 from dotenv import load_dotenv
 
-from database import SessionLocal, User, Scenario
+from database import SessionLocal, User, Scenario, SavedPlan
 import flood_engine
 import road_flooding
 import routing
@@ -63,6 +65,26 @@ def get_db():
         yield db
     finally:
         db.close()
+
+
+# The first real auth-PROTECTED endpoint in this backend -- every other
+# endpoint so far (e.g. FloodRequest.user_id) just trusts a client-supplied
+# user_id in the request body. This decodes the same Bearer token /login
+# already issues (same SECRET_KEY/ALGORITHM, same {"sub": user_id} claim
+# shape -- see login() below), so it's a real extension of the existing
+# JWT setup, not a new auth mechanism.
+_bearer_scheme = HTTPBearer()
+
+def get_current_user_id(credentials: HTTPAuthorizationCredentials = Depends(_bearer_scheme)) -> str:
+    try:
+        payload = jwt.decode(credentials.credentials, SECRET_KEY, algorithms=[ALGORITHM])
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    user_id = payload.get("sub")
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Invalid token payload")
+    return user_id
+
 
 class UserAuth(BaseModel):
     email: EmailStr
@@ -135,6 +157,60 @@ def login(user: UserAuth, db: Session = Depends(get_db)):
         "user_id": existing_user.id,
         "email": existing_user.email,
     }
+
+
+class SavePlanRequest(BaseModel):
+    plan_type: str  # "response" | "prevention"
+    # Whatever identifies the simulation run this plan was built against
+    # (cause_type, water_level_m, params) -- a snapshot, not a live
+    # reference, so a saved plan still means the same thing after the
+    # scenario itself changes.
+    scenario_snapshot: dict
+    # The real placed markers/embankments/closedRoads at save time.
+    actions: dict
+    # The report/impact result the user actually generated (Print/
+    # Download/Impact Report) -- optional, since a plan can be saved
+    # without having generated a report yet.
+    report_summary: Optional[dict] = None
+
+
+@app.post("/plans/save")
+def save_plan(request: SavePlanRequest, user_id: str = Depends(get_current_user_id), db: Session = Depends(get_db)):
+    if request.plan_type not in ("response", "prevention"):
+        raise HTTPException(status_code=400, detail="plan_type must be 'response' or 'prevention'")
+
+    plan = SavedPlan(
+        user_id=user_id,
+        plan_type=request.plan_type,
+        scenario_snapshot=json.dumps(request.scenario_snapshot),
+        actions=json.dumps(request.actions),
+        report_summary=json.dumps(request.report_summary) if request.report_summary is not None else None,
+    )
+    db.add(plan)
+    db.commit()
+    db.refresh(plan)
+    return {"id": plan.id, "created_at": plan.created_at.isoformat() if plan.created_at else None}
+
+
+@app.get("/plans/mine")
+def list_my_plans(user_id: str = Depends(get_current_user_id), db: Session = Depends(get_db)):
+    plans = (
+        db.query(SavedPlan)
+        .filter(SavedPlan.user_id == user_id)
+        .order_by(SavedPlan.created_at.desc())
+        .all()
+    )
+    return [
+        {
+            "id": p.id,
+            "plan_type": p.plan_type,
+            "scenario_snapshot": json.loads(p.scenario_snapshot),
+            "actions": json.loads(p.actions),
+            "report_summary": json.loads(p.report_summary) if p.report_summary else None,
+            "created_at": p.created_at.isoformat() if p.created_at else None,
+        }
+        for p in plans
+    ]
 
 
 FRAME_COUNT = 6
@@ -838,6 +914,46 @@ class AISuggestRequest(BaseModel):
 AI_SUGGEST_TIME_BUDGET_S = 35
 
 
+def _ai_http_error(ex):
+    """Turn an AI-pipeline exception into an HTTPException the UI can
+    actually act on.
+
+    A Groq quota/rate-limit rejection is not an internal server error
+    and not "this simulation has no hazards" -- both of which is how it
+    used to surface (the hazard analyst swallowed it and returned zero
+    zones with a 200). It gets its own 429 and the model's real
+    retry-after text, so the user knows to wait rather than assuming the
+    feature is broken. Anything else keeps the previous 500 + trailing
+    traceback, which is genuinely useful for a real code fault.
+    """
+    import traceback
+
+    if isinstance(ex, groq.RateLimitError):
+        detail = (
+            "Groq API quota reached, so the AI agents could not run. "
+            "This is an account limit, not a problem with your scenario. "
+            "Groq reported: " + str(getattr(ex, "message", None) or ex)
+        )
+        return HTTPException(status_code=429, detail=detail)
+
+    if isinstance(ex, groq.AuthenticationError):
+        return HTTPException(
+            status_code=502,
+            detail="Groq rejected the API key (check GROQ_API_KEY in Backend/.env). Groq reported: " + str(ex),
+        )
+
+    if isinstance(ex, groq.APIError):
+        return HTTPException(
+            status_code=502,
+            detail="The AI provider call failed: " + type(ex).__name__ + ": " + str(ex),
+        )
+
+    return HTTPException(
+        status_code=500,
+        detail=str(type(ex).__name__) + ": " + str(ex) + " | " + traceback.format_exc()[-500:],
+    )
+
+
 @app.post("/ai/prevention/suggest")
 def ai_prevention_suggest(request: AISuggestRequest):
     """
@@ -892,8 +1008,7 @@ def ai_prevention_suggest(request: AISuggestRequest):
     except HTTPException:
         raise
     except Exception as ex:
-        import traceback
-        raise HTTPException(status_code=500, detail=str(type(ex).__name__) + ": " + str(ex) + " | " + traceback.format_exc()[-500:])
+        raise _ai_http_error(ex)
 
 
 class AIResponseCompareRequest(BaseModel):
@@ -966,8 +1081,7 @@ def ai_response_compare(request: AIResponseCompareRequest):
     except HTTPException:
         raise
     except Exception as ex:
-        import traceback
-        raise HTTPException(status_code=500, detail=str(type(ex).__name__) + ": " + str(ex) + " | " + traceback.format_exc()[-500:])
+        raise _ai_http_error(ex)
 
 
 @app.post("/route")

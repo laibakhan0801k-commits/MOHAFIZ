@@ -10,10 +10,15 @@ strips out anything it invents before this ever reaches the Proposer or
 the user.
 """
 import json
+import logging
 
 import flood_engine
 import road_flooding
 import ai_llm
+
+# Propagates to uvicorn's own handler, so per-zone LLM failures are
+# visible in the terminal running the server instead of vanishing.
+logger = logging.getLogger(__name__)
 
 
 def get_current_simulation_stats(water_level_m):
@@ -181,15 +186,40 @@ def run_hazard_analyst(simulation_stats, num_zones=3, deadline=None):
 
     zones = []
     covered_names = []
+    errors = []
     for i in range(num_zones):
         if deadline is not None and time.time() >= deadline:
+            logger.warning("hazard analyst: time budget reached, stopping after %d/%d zone calls", i, num_zones)
             break
         prompt = build_single_zone_prompt(simulation_stats, i + 1, num_zones, covered_names)
         try:
             zone = ai_llm.call_llm_json(prompt, validate_fn=_validate_single_zone_shape, max_retries=3, deadline=deadline)
-        except Exception:
+        except Exception as ex:
+            # Previously a bare `except Exception: continue` with no
+            # logging. That silently converted a TOTAL LLM outage (an
+            # expired key, or -- the real case this was caught on -- a
+            # Groq 429 daily-token-quota rejection) into an empty
+            # priority_zones list, which the endpoint then returned as a
+            # perfectly successful 200. The UI could only report it as
+            # "0 priority zones identified from this simulation", which
+            # reads as "your scenario has no hazards" rather than "the
+            # AI never ran". Record the real error and keep going, so a
+            # single bad zone still doesn't sink the whole request.
+            logger.warning(
+                "hazard analyst: zone %d/%d failed: %s: %s",
+                i + 1, num_zones, type(ex).__name__, ex,
+            )
+            errors.append(ex)
             continue
         zones.append(zone)
         covered_names.extend(zone.get("affected_facility_names", []))
+
+    # Partial results still beat a failed request (unchanged): if ANY
+    # zone came back, return what succeeded. But zero zones plus at
+    # least one real error is not a real "no hazards found" answer --
+    # it means the analyst never got an answer at all, so surface the
+    # actual cause instead of an empty-but-successful response.
+    if not zones and errors:
+        raise errors[-1]
 
     return validate_hazard_response({"priority_zones": zones}, simulation_stats)

@@ -4,6 +4,7 @@
 Backend/.env
 
 # Python
+venv/
 Backend/venv/
 Backend/__pycache__/
 **/__pycache__/
