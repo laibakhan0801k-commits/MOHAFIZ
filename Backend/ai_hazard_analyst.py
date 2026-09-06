@@ -11,6 +11,7 @@ the user.
 """
 import json
 import logging
+import math
 
 import flood_engine
 import road_flooding
@@ -117,6 +118,58 @@ Return ONLY this JSON shape:
 {{"description": "short real description", "bbox": [west, south, east, north], "affected_facility_names": ["must be from the real list above"]}}"""
 
 
+# ai_candidates.generate_candidate_points only samples a waterway every
+# spacing_m=30m. A real live run confirmed this in practice: 2 real
+# zones, both correctly described as being along a real waterway
+# ("along the main Nullah Leh channel" / "along the Nullah Leh
+# corridor"), both returned zero candidates for every action type tried.
+# A separate local check (same waterway/building data, the FULL DEM
+# extent as the bbox) found 2,000+ real candidates for every one of
+# those action types -- so the data and the candidate generator are not
+# the problem. The zone bbox Gemini returned was simply narrower than
+# the 30m sampling gap, so it could contain a real stretch of the
+# waterway and still miss every sampled point along it.
+#
+# 150m (5x the sampling spacing) is enough margin to make that miss
+# very unlikely regardless of the waterway's angle through the box.
+# A "priority zone" for a corridor-scale flood is a district, not a
+# doorstep. At 150m the model's own bbox drove everything and coverage
+# swung wildly run to run -- one run returned a corridor-wide zone and
+# the plan reached 45% of at-risk buildings, the next returned a box
+# around a single hospital and the same plan reached 10%. Padding to a
+# real neighbourhood scale makes the candidate pool (and therefore the
+# plan) stable regardless of how tightly the model happens to draw the
+# box. Still clamped to the real DEM extent, so this can never invent
+# ground that is not modelled.
+MIN_ZONE_SIZE_M = 1500.0
+
+
+def _pad_bbox_to_min_size(bbox, dem_bounds, min_size_m):
+    """Expands `bbox` around its own center, in each dimension that is
+    narrower than `min_size_m` in real meters, then re-clamps to
+    `dem_bounds` -- padding must never push a zone outside modeled
+    ground. Leaves an already-large-enough bbox untouched."""
+    w, s, e, n = bbox
+    dw, ds, de, dn = dem_bounds
+    center_lon = (w + e) / 2
+    center_lat = (s + n) / 2
+
+    m_per_deg_lon = 111320.0 * math.cos(math.radians(center_lat))
+    m_per_deg_lat = 111320.0
+
+    width_m = (e - w) * m_per_deg_lon
+    height_m = (n - s) * m_per_deg_lat
+
+    if width_m < min_size_m and m_per_deg_lon > 0:
+        half_deg = (min_size_m / 2) / m_per_deg_lon
+        w, e = center_lon - half_deg, center_lon + half_deg
+    if height_m < min_size_m:
+        half_deg = (min_size_m / 2) / m_per_deg_lat
+        s, n = center_lat - half_deg, center_lat + half_deg
+
+    return [max(dw, w), max(ds, s), min(de, e), min(dn, n)]
+
+
 def validate_hazard_response(response, simulation_stats):
     """Reject/strip anything the LLM's output references that isn't
     actually in simulation_stats -- catches hallucinated facility names
@@ -149,12 +202,118 @@ def validate_hazard_response(response, simulation_stats):
             # when a zone with that bbox produced zero real candidates.
             zw, ze = min(bw, be), max(bw, be)
             zs, zn = min(bs, bn), max(bs, bn)
-            zone["bbox"] = [max(w, zw), max(s, zs), min(e, ze), min(n, zn)]
+            clamped = [max(w, zw), max(s, zs), min(e, ze), min(n, zn)]
+            zone["bbox"] = _pad_bbox_to_min_size(clamped, dem_bounds, MIN_ZONE_SIZE_M)
 
     return response
 
 
-def run_hazard_analyst(simulation_stats, num_zones=3, deadline=None):
+# Furthest a locally-protective prevention measure can be placed from
+# the channel and still be legal: retentionPond's own maxWaterwayDistance
+# (prevention_constants.ACTION_VALIDATION_CONFIG). Exposed buildings
+# beyond this plus a measure's own reach cannot be protected by ANY
+# valid prevention action, so a zone drawn around them would be a zone
+# the proposer could never serve.
+_MAX_MEASURE_OFFSET_M = 100.0
+
+
+def _exposure_zone(simulation_stats, existing_zones):
+    """A deterministic priority zone around the real buildings this
+    flood exposes -- appended only when the model's own zones don't
+    already reach any of them.
+
+    The Analyst picks zones from flooded AREA, which is the right way to
+    find where the water is but not where the damage is: on a real run
+    its two zones sat on the widest part of the floodplain while every
+    exposed building sat elsewhere, so the Proposer placed sixteen
+    perfectly valid measures that protected nobody (0% coverage). This
+    adds one zone drawn from the exposed buildings themselves.
+
+    Nothing here is invented: the buildings come from
+    prevention_coverage.at_risk_buildings (the same DEM-sample test
+    flood_engine already uses to count affected buildings), and the zone
+    is only offered around buildings a legal measure could actually
+    reach. Returns None when there is nothing to add.
+    """
+    try:
+        import prevention_coverage
+        import prevention_validation as _V
+        from shapely.geometry import Point as _Point
+
+        elevation, _valid = flood_engine.load_dem()
+        dem_bounds = flood_engine.get_dem_bounds()
+        water_level_m = simulation_stats["water_level_m"]
+        waterways = flood_engine.load_waterways()
+
+        exposed = prevention_coverage.at_risk_buildings(elevation, dem_bounds, water_level_m)
+        if not exposed:
+            return None
+
+        # Only buildings a valid measure could actually be placed near.
+        reach = prevention_coverage.action_protection_reach_m(
+            {"type": "retentionPond", "params": {"area": 10000}}
+        )
+        servable = []
+        for lon, lat in exposed:
+            d = _V.nearest_line_distance_m(_Point(lon, lat), waterways)
+            if d is not None and d <= _MAX_MEASURE_OFFSET_M + reach:
+                servable.append((lon, lat))
+        if not servable:
+            return None
+
+        # Densest cluster: the servable building with the most other
+        # servable buildings within one zone-width of it.
+        half_deg_lat = (MIN_ZONE_SIZE_M / 2) / 111320.0
+
+        def _near(a, b):
+            return prevention_coverage._distance_m(a[0], a[1], b[0], b[1]) <= MIN_ZONE_SIZE_M / 2
+
+        anchor = max(servable, key=lambda p: sum(1 for q in servable if _near(p, q)))
+        cluster = [q for q in servable if _near(anchor, q)]
+        # Skip only if a zone the model already chose covers MOST of
+        # that cluster. The first version of this check bailed out as
+        # soon as any single exposed building fell inside any zone,
+        # which on a real run meant one incidental building suppressed
+        # the zone drawn around the other seven.
+        for zone in existing_zones:
+            bbox = zone.get("bbox")
+            if not bbox or len(bbox) != 4:
+                continue
+            w, s_, e, n = bbox
+            inside = sum(1 for lon, lat in cluster if w <= lon <= e and s_ <= lat <= n)
+            if inside >= 0.6 * len(cluster):
+                return None
+
+        clon = sum(p[0] for p in cluster) / len(cluster)
+        clat = sum(p[1] for p in cluster) / len(cluster)
+        half_deg_lon = half_deg_lat / max(math.cos(math.radians(clat)), 1e-9)
+
+        dw, ds_, de, dn = dem_bounds
+        bbox = [
+            max(dw, clon - half_deg_lon), max(ds_, clat - half_deg_lat),
+            min(de, clon + half_deg_lon), min(dn, clat + half_deg_lat),
+        ]
+        return {
+            "bbox": _pad_bbox_to_min_size(bbox, dem_bounds, MIN_ZONE_SIZE_M),
+            "description": (
+                f"{len(cluster)} flood-exposed buildings clustered here, "
+                "within reach of a legal prevention measure"
+            ),
+            "reason": (
+                "Identified directly from the simulation: these buildings sit at or "
+                f"below {simulation_stats['water_level_m']}m + "
+                f"{prevention_coverage.AT_RISK_FREEBOARD_M}m freeboard, and are close "
+                "enough to the channel for a prevention measure to protect them."
+            ),
+            "affected_facility_names": [],
+            "derived": "exposed_buildings",
+        }
+    except Exception as ex:  # never let this optional extra sink a real run
+        logger.warning("hazard analyst: exposure zone skipped: %s: %s", type(ex).__name__, ex)
+        return None
+
+
+def run_hazard_analyst(simulation_stats, num_zones=2, deadline=None):
     """
     Makes `num_zones` SEPARATE single-zone LLM calls rather than one
     call asking for a JSON array of zone objects.
@@ -181,6 +340,14 @@ def run_hazard_analyst(simulation_stats, num_zones=3, deadline=None):
     timeout_s=15s) could blow well past the endpoint's own stated
     budget with nothing capping it, exactly the gap a real end-to-end
     test caught before this was added.
+
+    num_zones default lowered from 3 to 2 after switching to Gemini:
+    the free tier caps requests at 5/minute for gemini-3.6-flash, and
+    this Hazard Analyst call is only the FIRST stage -- the Proposer/
+    Strategist that follows makes several more real calls per zone on
+    top of it, all sharing the same per-minute budget. One fewer zone
+    here leaves more of that shared budget for the stage that actually
+    turns a zone into a real proposal.
     """
     import time
 
@@ -193,7 +360,12 @@ def run_hazard_analyst(simulation_stats, num_zones=3, deadline=None):
             break
         prompt = build_single_zone_prompt(simulation_stats, i + 1, num_zones, covered_names)
         try:
-            zone = ai_llm.call_llm_json(prompt, validate_fn=_validate_single_zone_shape, max_retries=3, deadline=deadline)
+            # max_retries lowered from 3: on Gemini's free tier each
+            # retry is a real, rate-limited API call (5/minute total,
+            # shared across every zone and the Proposer that follows).
+            # 1 retry still recovers from a transient failure without
+            # spending most of the per-minute budget on one zone alone.
+            zone = ai_llm.call_llm_json(prompt, validate_fn=_validate_single_zone_shape, max_retries=1, deadline=deadline)
         except Exception as ex:
             # Previously a bare `except Exception: continue` with no
             # logging. That silently converted a TOTAL LLM outage (an
@@ -222,4 +394,18 @@ def run_hazard_analyst(simulation_stats, num_zones=3, deadline=None):
     if not zones and errors:
         raise errors[-1]
 
-    return validate_hazard_response({"priority_zones": zones}, simulation_stats)
+    response = validate_hazard_response({"priority_zones": zones}, simulation_stats)
+
+    # Make sure at least one zone sits where the flood actually exposes
+    # buildings -- see _exposure_zone. Appended after validation because
+    # this zone is built from real geometry, not from model output, so
+    # it has nothing to validate against a facility list.
+    extra = _exposure_zone(simulation_stats, response["priority_zones"])
+    if extra is not None:
+        # FIRST, not last. The Proposer works through zones in order
+        # against a shared wall-clock budget, so a zone appended at the
+        # end gets whatever time the others left it -- and this is the
+        # one zone guaranteed to contain buildings worth protecting.
+        response["priority_zones"].insert(0, extra)
+
+    return response

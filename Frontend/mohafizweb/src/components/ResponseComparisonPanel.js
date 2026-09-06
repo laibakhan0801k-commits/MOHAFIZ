@@ -13,18 +13,51 @@ const T = {
   line: '#3E5C56',
 };
 
+// Every scenario's real response actions, with the SAME emoji/label the
+// manual tool list uses for each. Previously this held river overflow's
+// five only, so a rainfall/drainage/dam proposal rendered as a bare
+// "✨ drainBlockageClearance" -- the internal key, shown to the user.
 const ACTION_META = {
+  // river_overflow
   warningPoint: { emoji: '📢', label: 'Warning announcement point' },
   evacuationZone: { emoji: '⚠️', label: 'Priority evacuation zone' },
   closeRoad: { emoji: '🚧', label: 'Road closure & diversion point' },
   boatLaunch: { emoji: '🛟', label: 'Boat launch point' },
   reliefMedicalPost: { emoji: '🏕️', label: 'Relief camp / medical post' },
+  // rainfall
+  rainWarning: { emoji: '📢', label: 'Warning announcement point' },
+  rainEvacZone: { emoji: '⚠️', label: 'Priority evacuation zone' },
+  rainRoadClosure: { emoji: '🚧', label: 'Road closure & diversion' },
+  rainWaterRescue: { emoji: '🛟', label: 'Water rescue staging point' },
+  rainMedicalPost: { emoji: '🚑', label: 'Medical / first-aid post' },
+  rainReliefCamp: { emoji: '🏕️', label: 'Relief camp / shelter' },
+  // drainage_failure
+  drainBlockageClearance: { emoji: '🧹', label: 'Blockage / debris clearance point' },
+  drainPumpDeployment: { emoji: '🚜', label: 'Emergency drainage crew / pump deployment' },
+  drainSewerOverflow: { emoji: '☣️', label: 'Sewer / manhole overflow marker' },
+  drainVectorControl: { emoji: '🦟', label: 'Standing water / vector-control point' },
+  drainBypass: { emoji: '↪️', label: 'Temporary diversion / bypass point' },
+  // dam_release
+  damReleaseTracking: { emoji: '📊', label: 'Release-rate tracking point' },
+  damWarningPoint: { emoji: '⏱️', label: 'Dam-release warning point' },
+  damEvacZone: { emoji: '🌊', label: 'Time-tiered evacuation zone' },
+  damCrossingClosure: { emoji: '🌉', label: 'Bridge / crossing closure point' },
+  damRallyPoint: { emoji: '🏔️', label: 'High-ground rally point' },
 };
 
 // Every number this component renders comes from a real backend response
 // (Backend/main.py's /ai/response/compare -- the Hazard Reader,
 // Strategist, and Impact Evaluator agents) or the real validated_payload
 // on each proposal. Nothing here is invented client-side.
+// Depths arrive as raw float subtraction (water level minus ground
+// elevation), so a real value showed in the UI as
+// "12.799999999999955m max depth in zone". One decimal is already
+// finer than the DEM's own vertical accuracy.
+function fmtDepth(v) {
+  var n = Number(v);
+  return isFinite(n) ? Math.round(n * 10) / 10 : v;
+}
+
 export default function ResponseComparisonPanel(props) {
   var loading = props.aiResponseLoading;
   var result = props.aiResponseResult;
@@ -38,15 +71,32 @@ export default function ResponseComparisonPanel(props) {
   var proposals = (result && result.proposals) || [];
   var trace = (result && result.trace) || [];
   var comparison = result && result.comparison;
+  // Real zone breakdown / confidence / totals, computed server-side by
+  // Backend/ai_plan_summary.py from the real layers -- never asked of
+  // the model. See that module for what it deliberately does NOT
+  // compute (lives saved, minutes saved, damage %) and why.
+  var planSummary = result && result.plan_summary;
+
+  var RISK_COLOR = {
+    critical: T.alert,
+    high: '#FF8A3D',
+    medium: '#E8C547',
+    low: T.flow,
+  };
 
   var reasoningSummary = null;
   if (proposals.length > 0) {
     var withReasoning = proposals.filter(function (p) { return p.ai_reasoning; });
     if (withReasoning.length > 0) reasoningSummary = withReasoning[0].ai_reasoning;
   }
-  var allAdded = proposals.length > 0 && proposals.every(function (p) {
-    var key = p.action_type + '_' + p.location.lon.toFixed(6) + '_' + p.location.lat.toFixed(6);
-    return !!addedProposalKeys[key];
+  // Must build the key EXACTLY as the card below does (index included),
+  // or "all added" can never become true and the Apply-all button never
+  // settles into its done state.
+  var proposalKeyFor = function (p, i) {
+    return p.action_type + '_' + p.location.lon.toFixed(6) + '_' + p.location.lat.toFixed(6) + '_' + i;
+  };
+  var allAdded = proposals.length > 0 && proposals.every(function (p, i) {
+    return !!addedProposalKeys[proposalKeyFor(p, i)];
   });
 
   return (
@@ -142,13 +192,27 @@ export default function ResponseComparisonPanel(props) {
               plus these proposals, so the two columns can never drift. */}
           {comparison && (
             <div style={{ marginBottom: 8 }}>
-              {[
-                { label: 'Evacuation coverage', before: comparison.before.evacuation.percent, after: comparison.after.evacuation.percent, unit: '%' },
-                { label: 'Roads closed', before: comparison.before.roads.closed, after: comparison.after.roads.closed, unit: '' },
-                { label: 'Rescue-staging coverage', before: comparison.before.rescue.percent, after: comparison.after.rescue.percent, unit: '%' },
-                { label: 'Relief/medical coverage', before: comparison.before.relief.percent, after: comparison.after.relief.percent, unit: '%' },
-                { label: 'Warning coverage', before: comparison.before.warning.percent, after: comparison.after.warning.percent, unit: '%' },
-              ].map(function (row, i) {
+              {(function () {
+                // Row wording comes from the backend, per scenario
+                // (ai_response_evaluator.ROW_LABELS_BY_CAUSE). These
+                // five keys are shared across all four scenarios but do
+                // not measure the same things -- "roads" is flood-cut
+                // roads for a river overflow and channel crossings for
+                // a dam release. One hard-coded wording mislabelled
+                // three scenarios out of four.
+                var L = (result && result.row_labels) || {};
+                return [
+                { label: (L.evacuation === null ? null : (L.evacuation || 'Evacuation coverage')), before: comparison.before.evacuation.percent, after: comparison.after.evacuation.percent, unit: '%' },
+                { label: (L.roads === null ? null : (L.roads || 'Flood-cut roads barricaded')), before: comparison.before.roads.percent, after: comparison.after.roads.percent, unit: '%' },
+                { label: (L.rescue === null ? null : (L.rescue || 'Rescue-staging coverage')), before: comparison.before.rescue.percent, after: comparison.after.rescue.percent, unit: '%' },
+                { label: (L.relief === null ? null : (L.relief || 'Relief/medical coverage')), before: comparison.before.relief.percent, after: comparison.after.relief.percent, unit: '%' },
+                { label: (L.warning === null ? null : (L.warning || 'Warning coverage')), before: comparison.before.warning.percent, after: comparison.after.warning.percent, unit: '%' },
+                // A row whose label is explicitly null does not apply to
+                // this scenario (dam release has no relief/medical
+                // action, and its percent is hard-coded 0), so drop it
+                // rather than show a permanent 0% that reads as failure.
+                ].filter(function (r) { return r.label !== null && r.label !== undefined; });
+              })().map(function (row, i) {
                 var improved = row.after > row.before;
                 return (
                   <div key={i} style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', padding: '4px 2px', fontSize: 10.5 }}>
@@ -163,8 +227,127 @@ export default function ResponseComparisonPanel(props) {
             </div>
           )}
 
+          {/* PLAN COVERAGE SCORE. Deliberately NOT called "confidence":
+              this measures how thoroughly the plan covers the risk that
+              was identified, not how likely it is to succeed -- there is
+              no model here that could honestly claim the latter. The
+              score is only ever shown WITH its three factors, because
+              each factor is a real measurement that can be checked,
+              while the weighting that blends them into one number is a
+              design choice. Number alone would be indefensible. */}
+          {planSummary && planSummary.confidence && (
+            <div style={{ marginBottom: 8, padding: 10, borderRadius: 11, background: T.surface2, border: '1px solid ' + T.line }}>
+              <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', marginBottom: 6 }}>
+                <span style={{ fontSize: 11, fontWeight: 800, color: T.paper }}>Plan Coverage Score</span>
+                <span style={{ fontSize: 18, fontWeight: 800, color: T.flow }}>{planSummary.confidence.score}%</span>
+              </div>
+              <div style={{ height: 6, borderRadius: 4, background: T.ink, overflow: 'hidden', marginBottom: 8 }}>
+                <div style={{ width: planSummary.confidence.score + '%', height: '100%', background: T.flow }} />
+              </div>
+              {(planSummary.confidence.factors || []).map(function (f, i) {
+                return (
+                  <div key={i} style={{ marginBottom: 5 }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 10.5 }}>
+                      <span style={{ color: T.mint }}>{f.label}</span>
+                      <span style={{ color: T.paper, fontWeight: 700 }}>{f.value}</span>
+                    </div>
+                    <div style={{ fontSize: 9.5, color: T.mint, opacity: 0.65, lineHeight: 1.35 }}>{f.detail}</div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {/* OVERALL IMPACT -- real totals only. The reference design's
+              "lives saved / time saved / damage reduced" are not here on
+              purpose: this project has no mortality, evacuation-timing
+              or asset-value model, so those numbers could only be
+              invented. These are their measurable equivalents. */}
+          {planSummary && planSummary.overall && (
+            <div style={{ display: 'flex', gap: 6, marginBottom: 8 }}>
+              {[
+                { label: 'Buildings covered', value: planSummary.overall.buildings_covered + ' / ' + planSummary.overall.buildings_at_risk },
+                { label: 'People reached', value: '≈' + planSummary.overall.people_in_covered_buildings },
+                { label: 'Zones addressed', value: planSummary.overall.zones_addressed + ' / ' + planSummary.overall.zones_total },
+              ].map(function (tile, i) {
+                return (
+                  <div key={i} style={{ flex: 1, padding: '7px 8px', borderRadius: 10, background: T.ink, border: '1px solid ' + T.line }}>
+                    <div style={{ fontSize: 13, fontWeight: 800, color: T.flow }}>{tile.value}</div>
+                    <div style={{ fontSize: 9, color: T.mint, opacity: 0.75, marginTop: 1 }}>{tile.label}</div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {/* PLAN BY ZONE -- every zone the Hazard Reader really found,
+              with its measured exposure and the real actions placed in
+              it. A zone with no actions is shown as such rather than
+              hidden, so the plan's gaps stay visible. */}
+          {planSummary && (planSummary.zones || []).length > 0 && (
+            <div style={{ marginBottom: 8 }}>
+              <div style={{ fontSize: 11, fontWeight: 800, color: T.paper, marginBottom: 5 }}>Plan by zone</div>
+              {planSummary.zones.map(function (z) {
+                var color = RISK_COLOR[z.risk_level] || T.mint;
+                return (
+                  <div key={z.zone_index} style={{ marginBottom: 6, padding: 9, borderRadius: 11, background: T.surface2, border: '1px solid ' + T.line, borderLeft: '3px solid ' + color }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 6 }}>
+                      <span style={{ fontSize: 10.5, fontWeight: 800, color: T.paper }}>Zone {z.zone_index + 1}</span>
+                      <span style={{ fontSize: 9, fontWeight: 800, color: color, textTransform: 'uppercase', letterSpacing: '.04em' }}>
+                        {z.risk_level}
+                      </span>
+                    </div>
+                    <div style={{ fontSize: 10, color: T.mint, opacity: 0.85, marginTop: 3, lineHeight: 1.35 }}>
+                      {z.description}
+                    </div>
+                    <div style={{ display: 'flex', gap: 10, marginTop: 5, fontSize: 10, color: T.mint }}>
+                      <span>🏚️ <b style={{ color: T.paper }}>{z.buildings_at_risk}</b> buildings</span>
+                      <span>👥 <b style={{ color: T.paper }}>≈{z.population_at_risk}</b></span>
+                      <span>💧 <b style={{ color: T.paper }}>{z.max_depth_m}m</b> max</span>
+                    </div>
+                    <div style={{ marginTop: 6 }}>
+                      {z.actions.length === 0 ? (
+                        <div style={{ fontSize: 10, color: T.alert, fontWeight: 700 }}>
+                          ⚠ No action placed here — this zone is still uncovered
+                        </div>
+                      ) : (
+                        z.actions.map(function (a, ai) {
+                          var meta = ACTION_META[a.action_type] || { emoji: '✨', label: a.action_type };
+                          var cov = a.real_coverage || {};
+                          return (
+                            <div key={ai} style={{ marginTop: 4 }}>
+                              <div style={{ fontSize: 10, color: T.paper, fontWeight: 700 }}>
+                                ✅ {meta.emoji} {meta.label}
+                                {cov.buildings_covered !== undefined && (
+                                  <span style={{ color: T.flow, marginLeft: 5 }}>
+                                    covers {cov.buildings_covered} buildings
+                                  </span>
+                                )}
+                              </div>
+                              {a.reasoning && (
+                                <div style={{ fontSize: 9.5, color: T.mint, opacity: 0.8, fontStyle: 'italic', lineHeight: 1.35, marginTop: 1 }}>
+                                  {a.reasoning}
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
           {proposals.map(function (p, i) {
-            var proposalKey = p.action_type + '_' + p.location.lon.toFixed(6) + '_' + p.location.lat.toFixed(6);
+            // Index included so two proposals that validate to the same
+              // point can never collide: React needs a unique key, and
+              // this same string keys addedProposalKeys -- a shared key
+              // made "Add to plan" mark both cards as added while only
+              // one marker was created. The backend also drops such
+              // duplicates now; this is the belt-and-braces half.
+              var proposalKey = proposalKeyFor(p, i);
             var meta = ACTION_META[p.action_type] || { emoji: '✨', label: p.action_type };
             var cov = p.real_coverage || {};
             var added = !!addedProposalKeys[proposalKey];
@@ -190,13 +373,13 @@ export default function ResponseComparisonPanel(props) {
                   )}
                   {cov.max_depth_m !== undefined && (
                     <div>
-                      <div style={{ fontWeight: 800, color: '#059669' }}>{cov.max_depth_m}m</div>
+                      <div style={{ fontWeight: 800, color: '#059669' }}>{fmtDepth(cov.max_depth_m)}m</div>
                       <div style={{ fontSize: 9, color: '#78716c' }}>max depth in zone</div>
                     </div>
                   )}
                   {cov.road_depth_m !== undefined && (
                     <div>
-                      <div style={{ fontWeight: 800, color: '#059669' }}>{cov.road_depth_m}m</div>
+                      <div style={{ fontWeight: 800, color: '#059669' }}>{fmtDepth(cov.road_depth_m)}m</div>
                       <div style={{ fontSize: 9, color: '#78716c' }}>water on road</div>
                     </div>
                   )}

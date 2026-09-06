@@ -39,9 +39,14 @@ export default function PreventionPlanPanel(props) {
 
   var proposals = (aiResult && aiResult.proposals) || [];
   var trace = (aiResult && aiResult.trace) || [];
-  var allAdded = proposals.length > 0 && proposals.every(function (p) {
-    var key = p.action_type + '_' + p.location.lon.toFixed(6) + '_' + p.location.lat.toFixed(6);
-    return !!addedProposalKeys[key];
+  // Must build the key EXACTLY as the card below does (index included),
+  // or "all added" can never become true and the Apply-all button never
+  // settles into its done state.
+  var proposalKeyFor = function (p, i) {
+    return p.action_type + '_' + p.location.lon.toFixed(6) + '_' + p.location.lat.toFixed(6) + '_' + i;
+  };
+  var allAdded = proposals.length > 0 && proposals.every(function (p, i) {
+    return !!addedProposalKeys[proposalKeyFor(p, i)];
   });
 
   // "Why this plan is strong" -- a real one-line summary computed from
@@ -275,7 +280,13 @@ export default function PreventionPlanPanel(props) {
             )}
 
             {proposals.map(function (p, i) {
-              var proposalKey = p.action_type + '_' + p.location.lon.toFixed(6) + '_' + p.location.lat.toFixed(6);
+              // Index included so two proposals that validate to the same
+              // point can never collide: React needs a unique key, and
+              // this same string keys addedProposalKeys -- a shared key
+              // made "Add to plan" mark both cards as added while only
+              // one marker was created. The backend also drops such
+              // duplicates now; this is the belt-and-braces half.
+              var proposalKey = proposalKeyFor(p, i);
               var toolDef = tools.find(function (t) { return t.key === p.action_type; }) ||
                 (props.allTools || []).find(function (t) { return t.key === p.action_type; });
               var impact = p.real_impact;

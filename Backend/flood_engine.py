@@ -534,6 +534,24 @@ def list_affected_facilities(water_level_m: float, limit: int = 25):
 # PREVENTION: terrain-modifying interventions (embankments, etc.)
 # ---------------------------------------------------------------------
 
+# Half a pixel diagonal, in metres. A line-shaped measure narrower than
+# this can fall entirely BETWEEN pixel centres and mark nothing at all:
+# apply_line_raise's default 8m buffer is sub-pixel on this ~26x31m DEM,
+# so a real 180m embankment measured pixels_raised = 0 and changed
+# neither the flood extent nor the building count. Widening the band to
+# the raster's own resolution is not inflating the measure -- it is the
+# minimum width at which a wall that genuinely crosses a cell is
+# represented in that cell at all.
+def _min_line_buffer_m(dem_bounds, shape):
+    import math as _m
+    west, south, east, north = dem_bounds
+    H, W = shape
+    lat_mid = (north + south) / 2
+    px_w = abs(east - west) / max(W, 1) * 111320 * _m.cos(_m.radians(lat_mid))
+    px_h = abs(north - south) / max(H, 1) * 111320
+    return 0.5 * _m.hypot(px_w, px_h)
+
+
 def apply_line_raise(elevation_array, dem_bounds, line_coords, height_m, buffer_m=8):
     """
     Returns a MODIFIED COPY of the elevation array with a real embankment
@@ -547,6 +565,9 @@ def apply_line_raise(elevation_array, dem_bounds, line_coords, height_m, buffer_
     H, W = elevation_array.shape
 
     modified = elevation_array.copy()
+
+    # Never narrower than the raster can represent -- see _min_line_buffer_m.
+    buffer_m = max(buffer_m, _min_line_buffer_m(dem_bounds, elevation_array.shape))
 
     lat_mid = (north + south) / 2
     m_per_deg_lat = 111320
@@ -739,6 +760,9 @@ def apply_line_lower(elevation_array, dem_bounds, line_coords, depth_m,
     west, south, east, north = dem_bounds
     H, W = elevation_array.shape
     modified = elevation_array.copy()
+
+    # Never narrower than the raster can represent -- see _min_line_buffer_m.
+    buffer_m = max(buffer_m, _min_line_buffer_m(dem_bounds, elevation_array.shape))
 
     lat_mid = (north + south) / 2
     m_per_deg_lat = 111320

@@ -135,10 +135,23 @@ WIDEN_CHANNEL_DEPTH_M = 0.5              # SYNC: main.py _build_terrain_args 'wi
 #   - rainfall is broader: both overland runoff AND channel capacity
 #     matter (see rainfall_band_severity / the volume-conserving model),
 #     so it gets the widest pool.
+#
+# Every entry below is checked against PlanWorkspace.js's own
+# PREVENTION_TOOLS[*].causeTypes -- the manual click UI's real per-
+# scenario action list -- so the AI can never try (or be missing) an
+# action a human placing one by hand wouldn't see for this cause_type.
+# The previous version of this table predated a few of those tools and
+# had drifted: "rainfall" listed "embankment" (not a real rainfall
+# option; causeTypes=['river_overflow','dam_release']) while missing
+# "clearDrains"/"widenChannel" (real rainfall options it never got to
+# try), and "dam_release" listed "widenChannel" the same way
+# (causeTypes=['rainfall','river_overflow','drainage_failure'] --
+# dam_release isn't in it). All four rows below are now the exact real
+# action set for that cause_type, high-impact/structural actions first.
 # ---------------------------------------------------------------------
 CAUSE_TYPE_ACTION_WEIGHTS = {
-    "drainage_failure": ["desilt", "clearDrains", "widenChannel"],
-    "river_overflow": ["embankment", "widenChannel"],
-    "dam_release": ["embankment", "widenChannel"],
-    "rainfall": ["retentionPond", "greenBuffer", "desilt", "embankment"],
+    "drainage_failure": ["desilt", "clearDrains", "widenChannel", "retentionPond", "warningGauge"],
+    "river_overflow": ["embankment", "widenChannel", "removeEncroachment", "retentionPond", "greenBuffer", "warningGauge"],
+    "dam_release": ["embankment", "removeEncroachment", "retentionPond", "greenBuffer", "warningGauge"],
+    "rainfall": ["retentionPond", "greenBuffer", "desilt", "clearDrains", "widenChannel"],
 }

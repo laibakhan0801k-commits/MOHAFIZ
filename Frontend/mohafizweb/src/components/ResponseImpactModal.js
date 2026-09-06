@@ -285,25 +285,61 @@ export default function ResponseImpactModal({ scenario, result, onSeeFullReport,
           <div style={{ flex: 1 }}>
             <div style={{ fontSize: 13, fontWeight: 700, color: '#dc2626', marginBottom: 8 }}>Before (no plan)</div>
             <div ref={beforeContainer} style={{ width: '100%', height: 200, borderRadius: 10, border: '1px solid #fecaca', marginBottom: 8, overflow: 'hidden' }} />
-            <div style={{ fontSize: 11, color: '#334155' }}>
-              {result.before.statRows.map(function (row, i) {
-                return (
-                  <div key={i} style={{ marginBottom: 3 }}><b>{row.value}</b> {row.suffix}</div>
-                );
-              })}
-            </div>
           </div>
           <div style={{ flex: 1 }}>
             <div style={{ fontSize: 13, fontWeight: 700, color: '#059669', marginBottom: 8 }}>After (with plan)</div>
             <div ref={afterContainer} style={{ width: '100%', height: 200, borderRadius: 10, border: '1px solid #bbf7d0', marginBottom: 8, overflow: 'hidden' }} />
-            <div style={{ fontSize: 11, color: '#334155' }}>
-              {result.after.statRows.map(function (row, i) {
-                return (
-                  <div key={i} style={{ marginBottom: 3 }}><b>{row.value}</b> {row.suffix}</div>
-                );
-              })}
-            </div>
           </div>
+        </div>
+
+        {/* One before -> after table instead of the same five sentences
+            printed under each map. Every number is the backend's own
+            coverage figure; this only pairs the two columns up so the
+            change is readable at a glance. Rows carrying only the old
+            {value, suffix} shape (saved plans from before this) still
+            render, via the fallbacks below. */}
+        <div style={{ border: '1px solid #e2e8f0', borderRadius: 12, overflow: 'hidden', marginBottom: 14 }}>
+          {result.before.statRows.map(function (b, i) {
+            const a = result.after.statRows[i] || b;
+            const hasPct = typeof b.pct === 'number' && typeof a.pct === 'number';
+            const delta = hasPct ? a.pct - b.pct : null;
+            const improved = delta !== null && delta > 0;
+            return (
+              <div
+                key={i}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 10,
+                  padding: '9px 12px', fontSize: 12,
+                  background: i % 2 ? '#f8fafc' : 'white',
+                  borderTop: i ? '1px solid #eef2f6' : 'none',
+                }}
+              >
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontWeight: 700, color: '#0f172a' }}>
+                    {a.label || a.suffix}
+                  </div>
+                  {a.detail && (
+                    <div style={{ fontSize: 10.5, color: '#64748b', marginTop: 1 }}>{a.detail}</div>
+                  )}
+                </div>
+                <div style={{ display: 'flex', alignItems: 'baseline', gap: 6, whiteSpace: 'nowrap' }}>
+                  <span style={{ color: '#94a3b8', fontWeight: 700 }}>{b.value}</span>
+                  <span style={{ color: '#cbd5e1' }}>&rarr;</span>
+                  <span style={{ fontSize: 16, fontWeight: 900, color: improved ? '#059669' : '#475569' }}>
+                    {a.value}
+                  </span>
+                  {improved && (
+                    <span style={{
+                      fontSize: 10, fontWeight: 800, color: '#059669',
+                      background: '#dcfce7', borderRadius: 999, padding: '2px 6px',
+                    }}>
+                      +{delta}
+                    </span>
+                  )}
+                </div>
+              </div>
+            );
+          })}
         </div>
 
         <div style={{

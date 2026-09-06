@@ -1254,6 +1254,41 @@ function validateEmbankmentLine(lineCoords, waterwaysGeoJSON, buildingsGeoJSON, 
 // moves faster and gives far less warning, so it needs its own thresholds
 // instead of silently inheriting these. Supporting a new scenario means
 // adding a key here — no other code below is scenario-specific.
+// Scenarios whose response rules are really ported on the BACKEND too
+// (Backend/ai_response_strategist.SUPPORTED_CAUSE_TYPES). Kept as one
+// list rather than an inline condition: when drainage_failure and
+// dam_release were added server-side, this gate was still hard-coded to
+// river_overflow/rainfall, so the button stayed hidden for two
+// scenarios that actually worked.
+// Every scenario's response actions that behave as a ROAD CLOSURE when
+// added to a plan (they become closedRoads entries, not markers).
+const ROAD_CLOSURE_ACTION_TYPES = ['closeRoad', 'rainRoadClosure', 'damCrossingClosure'];
+
+// One lookup across all four scenarios' response tool lists. An AI
+// proposal carries only its action_type, so resolving it against a
+// single scenario's list silently dropped every other scenario's
+// actions.
+// Formats a number for the plan summary without ever throwing. These
+// lines call .toFixed()/.toLocaleString() straight on backend fields, so
+// one missing field took down the entire page render rather than
+// degrading a single line -- which is exactly what a missing
+// distance_from_dam_km did to every applied AI dam plan.
+function fmtNum(v, digits) {
+  const n = Number(v);
+  if (!isFinite(n)) return '—';
+  return digits === undefined ? n.toLocaleString() : n.toFixed(digits);
+}
+
+function findResponseToolDef(actionType) {
+  return RESPONSE_TOOLS.find(function (t) { return t.key === actionType; })
+    || RAINFALL_RESPONSE_TOOLS.find(function (t) { return t.key === actionType; })
+    || DRAINAGE_FAILURE_RESPONSE_TOOLS.find(function (t) { return t.key === actionType; })
+    || DAM_RELEASE_RESPONSE_TOOLS.find(function (t) { return t.key === actionType; })
+    || null;
+}
+
+const AI_RESPONSE_SUPPORTED_CAUSE_TYPES = ['river_overflow', 'rainfall', 'drainage_failure', 'dam_release'];
+
 const RESPONSE_RULES = {
   river_overflow: {
     // The DEM quantises elevation at 1m (289 distinct values across 298m
@@ -3751,19 +3786,38 @@ function coveredByAnyMarker(points, zoneMarkers, radiusField, fixedRadiusM) {
 // responseImpactMapOverlay and responseImpactVerdict below can be
 // shared verbatim by every scenario's own compute*ResponseCoverage —
 // only the marker filtering and at-risk definition differ per scenario.
+// How close a placed closure has to be to a flood-cut road segment to
+// count as closing it. Manual closures carry the segment's own
+// roadIndex; AI-added ones are built from the backend's validated
+// payload and set roadIndex: null, so index matching alone reported
+// "0 of 137 roads barricaded" for a plan that visibly contained four
+// road closures -- on the map they also never turned from red to green.
+// Matching on real geometry covers both.
+const ROAD_CLOSURE_MATCH_M = 40;
+
+function roadClosedByAny(feature, closedRoads) {
+  const idx = feature.properties ? feature.properties.roadIndex : null;
+  for (let i = 0; i < (closedRoads || []).length; i++) {
+    const r = closedRoads[i];
+    if (r.roadIndex !== null && r.roadIndex !== undefined && r.roadIndex === idx) return true;
+    if (r.lat === undefined || r.lon === undefined) continue;
+    try {
+      const d = turf.pointToLineDistance(turf.point([r.lon, r.lat]), feature, { units: 'meters' });
+      if (d <= ROAD_CLOSURE_MATCH_M) return true;
+    } catch (err) { /* degenerate segment -- fall through */ }
+  }
+  return false;
+}
+
 function computeRiverOverflowResponseCoverage(scenario, geoData, markers, closedRoads) {
   const atRisk = riverOverflowAtRiskBuildings(scenario, geoData);
   const totalBuildings = atRisk.length;
   const totalPeople = estimatePeople(totalBuildings);
 
   const floodedRoadFeatures = (geoData.floodedRoadsGeoJSON && geoData.floodedRoadsGeoJSON.features) || [];
-  const closedIndex = {};
-  (closedRoads || []).forEach(function (r) {
-    if (r.roadIndex !== null && r.roadIndex !== undefined) closedIndex[r.roadIndex] = true;
-  });
   const roadFeatures = floodedRoadFeatures.map(function (f) {
     return Object.assign({}, f, {
-      properties: Object.assign({}, f.properties, { closed: !!closedIndex[f.properties.roadIndex] }),
+      properties: Object.assign({}, f.properties, { closed: roadClosedByAny(f, closedRoads) }),
     });
   });
   const roadsClosed = roadFeatures.filter(function (f) { return f.properties.closed; }).length;
@@ -3785,7 +3839,14 @@ function computeRiverOverflowResponseCoverage(scenario, geoData, markers, closed
     atRisk: atRisk,
     totalBuildings: totalBuildings,
     totalPeople: totalPeople,
-    roads: { total: roadFeatures.length, open: roadsOpen, closed: roadsClosed },
+    // percent included so the report can state road closure the same
+    // way every other row states coverage -- a before/after that
+    // moves. The old row printed a raw "N open, 0 closed" pair,
+    // which reads as a flood measurement (it is not -- "closed"
+    // means YOU barricaded it) and stayed identical in both
+    // columns whenever no closure was placed.
+    roads: { total: roadFeatures.length, open: roadsOpen, closed: roadsClosed,
+             percent: roadFeatures.length > 0 ? Math.round((roadsClosed / roadFeatures.length) * 100) : 0 },
     roadFeatures: roadFeatures,
     evacuation: { covered: evacCovered, percent: pct(evacCovered) },
     rescue: { covered: rescueCovered, percent: pct(rescueCovered) },
@@ -3807,12 +3868,33 @@ function computeRiverOverflowResponseCoverage(scenario, geoData, markers, closed
 // concept (flooded roads vs. flagged low-point/underpass segments)
 // while every other row stays identically worded across scenarios.
 function responseImpactStatRows(cov, roadsSuffix) {
+  // label  -- two or three words, for the compact before/after table
+  // detail -- the real counts behind the percentage
+  // suffix -- the original full sentence, kept because saved plans in
+  //           My Plans render older rows that only carry this field
+  const roadName = roadsSuffix || 'flooded roads';
   return [
-    { value: cov.evacuation.percent + '%', suffix: 'of at-risk buildings covered by an evacuation zone' },
-    { value: cov.roads.open + ' open, ' + cov.roads.closed + ' closed', suffix: roadsSuffix || 'flooded roads' },
-    { value: cov.rescue.percent + '%', suffix: 'of at-risk buildings within rescue-staging reach' },
-    { value: cov.relief.percent + '%', suffix: 'of at-risk buildings within relief camp / medical reach' },
-    { value: cov.warning.percent + '%', suffix: 'of at-risk population within warning range' },
+    { label: 'Evacuation', pct: cov.evacuation.percent,
+      value: cov.evacuation.percent + '%',
+      detail: cov.evacuation.covered + ' of ' + cov.totalBuildings + ' at-risk buildings',
+      suffix: 'of at-risk buildings covered by an evacuation zone' },
+    { label: 'Roads barricaded', pct: cov.roads.percent,
+      value: cov.roads.percent + '%',
+      detail: cov.roads.closed + ' of ' + cov.roads.total + ' ' + roadName,
+      suffix: 'of ' + cov.roads.total + ' ' + roadName +
+              ' closed with a signed diversion (' + cov.roads.closed + ' of ' + cov.roads.total + ')' },
+    { label: 'Rescue staging', pct: cov.rescue.percent,
+      value: cov.rescue.percent + '%',
+      detail: cov.rescue.covered + ' of ' + cov.totalBuildings + ' at-risk buildings',
+      suffix: 'of at-risk buildings within rescue-staging reach' },
+    { label: 'Relief / medical', pct: cov.relief.percent,
+      value: cov.relief.percent + '%',
+      detail: cov.relief.covered + ' of ' + cov.totalBuildings + ' at-risk buildings',
+      suffix: 'of at-risk buildings within relief camp / medical reach' },
+    { label: 'Warning reach', pct: cov.warning.percent,
+      value: cov.warning.percent + '%',
+      detail: cov.warning.covered + ' of ' + cov.totalBuildings + ' at-risk buildings',
+      suffix: 'of at-risk population within warning range' },
   ];
 }
 
@@ -3856,20 +3938,44 @@ function responseImpactVerdict(after) {
   if (after.totalBuildings === 0) {
     return { text: 'No buildings currently sit inside a mapped risk area.', tone: 'neutral' };
   }
-  const gaps = [
-    { pct: 100 - after.warning.percent, text: 'still unwarned' },
-    { pct: 100 - after.evacuation.percent, text: 'outside any evacuation zone' },
-    { pct: 100 - after.rescue.percent, text: 'outside rescue-staging reach' },
-    { pct: 100 - after.relief.percent, text: 'outside relief camp / medical reach' },
+  const categories = [
+    { pct: after.warning.percent, covered: 'warned', gap: 'still unwarned' },
+    { pct: after.evacuation.percent, covered: 'inside an evacuation zone', gap: 'outside any evacuation zone' },
+    { pct: after.rescue.percent, covered: 'within rescue-staging reach', gap: 'outside rescue-staging reach' },
+    { pct: after.relief.percent, covered: 'within relief camp / medical reach', gap: 'outside relief camp / medical reach' },
   ];
-  gaps.sort(function (a, b) { return b.pct - a.pct; });
+
+  const best = categories.slice().sort(function (a, b) { return b.pct - a.pct; })[0];
+  const gaps = categories.slice().sort(function (a, b) { return a.pct - b.pct; });
   const worst = gaps[0];
-  if (worst.pct <= 0) {
+
+  if (worst.pct >= 100) {
     return { text: 'Every at-risk building is covered by this plan across all four categories.', tone: 'good' };
   }
+
+  // Lead with what the plan ACHIEVED, then name the biggest remaining
+  // gap. Previously this reported ONLY the single worst category, which
+  // made a genuinely strong plan read as a total failure: with
+  // evacuation at 42%, warning at 48% and rescue at 34%, the line still
+  // said "100% of at-risk buildings are outside relief camp / medical
+  // reach" purely because relief posts need dry ground near an
+  // evacuation zone and almost every candidate facility is underwater
+  // at these depths. That is a real, correct rejection -- but quoting
+  // it alone hid three categories that had moved from 0%.
+  if (best.pct <= 0) {
+    // worst.pct is a COVERAGE figure, so the uncovered share is its
+    // complement -- printing it directly said "0% are still unwarned"
+    // for a plan covering nothing at all.
+    return {
+      text: 'This plan does not yet cover any at-risk buildings — ' + (100 - worst.pct) + '% are ' + worst.gap + '.',
+      tone: 'bad',
+    };
+  }
+
   return {
-    text: worst.pct + '% of at-risk buildings are ' + worst.text + '.',
-    tone: worst.pct >= 50 ? 'bad' : 'warn',
+    text: best.pct + '% of at-risk buildings are now ' + best.covered +
+      ' · biggest remaining gap: ' + (100 - worst.pct) + '% ' + worst.gap + '.',
+    tone: best.pct >= 50 ? 'good' : best.pct >= 25 ? 'warn' : 'bad',
   };
 }
 
@@ -3966,7 +4072,14 @@ function computeRainfallResponseCoverage(geoData, markers, closedRoads) {
     atRisk: atRisk,
     totalBuildings: totalBuildings,
     totalPeople: totalPeople,
-    roads: { total: roadFeatures.length, open: roadsOpen, closed: roadsClosed },
+    // percent included so the report can state road closure the same
+    // way every other row states coverage -- a before/after that
+    // moves. The old row printed a raw "N open, 0 closed" pair,
+    // which reads as a flood measurement (it is not -- "closed"
+    // means YOU barricaded it) and stayed identical in both
+    // columns whenever no closure was placed.
+    roads: { total: roadFeatures.length, open: roadsOpen, closed: roadsClosed,
+             percent: roadFeatures.length > 0 ? Math.round((roadsClosed / roadFeatures.length) * 100) : 0 },
     roadFeatures: roadFeatures,
     evacuation: { covered: evacCovered, percent: pct(evacCovered) },
     rescue: { covered: rescueCovered, percent: pct(rescueCovered) },
@@ -4111,23 +4224,35 @@ function computeDrainageFailureResponseCoverage(scenario, geoData, markers) {
 }
 
 function drainageFailureImpactStatRows(cov) {
+  // Same {label, pct, value, detail} shape as the other scenarios.
   const rows = [
     {
-      value: cov.areaAddressedPct + '% addressed, ' + (100 - cov.areaAddressedPct) + '% untreated',
+      label: 'Drainage-risk area treated', pct: cov.areaAddressedPct,
+      value: cov.areaAddressedPct + '%',
+      detail: (100 - cov.areaAddressedPct) + '% of the mapped risk area still untreated',
       suffix: 'of the mapped drainage-risk area',
     },
     {
-      value: cov.overflow.warned + ' warned, ' + cov.overflow.unwarned + ' unwarned',
+      label: 'Overflow points flagged', pct: cov.overflow.percent,
+      value: cov.overflow.percent + '%',
+      detail: cov.overflow.warned + ' of ' + cov.overflow.total + ' flagged sewer / manhole points',
       suffix: 'flagged sewer/manhole overflow points',
     },
   ];
   if (cov.vectorPointCount === 0) {
-    rows.push({ value: 'not placed', suffix: 'standing-water / vector-control point' });
+    rows.push({ label: 'Vector control', value: 'not placed',
+                detail: 'no standing-water / vector-control point in this plan',
+                suffix: 'standing-water / vector-control point' });
   } else if (cov.worstZoneCount === 0) {
-    rows.push({ value: 'n/a', suffix: 'no drainage-risk zones mapped to rank by persistence' });
+    rows.push({ label: 'Vector control', value: 'n/a',
+                detail: 'no drainage-risk zones mapped to rank by persistence',
+                suffix: 'no drainage-risk zones mapped to rank by persistence' });
   } else {
     rows.push({
+      label: 'Vector control on worst zones',
       value: cov.vectorCoversWorst ? '✅ yes' : '❌ no',
+      detail: 'the ' + cov.worstZoneCount + ' zone' + (cov.worstZoneCount > 1 ? 's' : '') +
+        ' that have persisted longest',
       suffix: 'the vector-control point covers the ' + cov.worstZoneCount +
         ' zone' + (cov.worstZoneCount > 1 ? 's' : '') + ' that have persisted longest',
     });
@@ -4290,7 +4415,7 @@ function damCrossingCandidates(geoData, rules) {
   return clusters;
 }
 
-function computeDamReleaseResponseCoverage(scenario, geoData, markers, crossingCandidates) {
+function computeDamReleaseResponseCoverage(scenario, geoData, markers, crossingCandidates, closedRoads) {
   const rules = getResponseRules(scenario);
   const discharge = currentDischargeCusecs(geoData, rules);
 
@@ -4300,7 +4425,16 @@ function computeDamReleaseResponseCoverage(scenario, geoData, markers, crossingC
 
   const evacZones = (markers || []).filter(function (m) { return m.type === 'damEvacZone'; });
   const rallyPoints = (markers || []).filter(function (m) { return m.type === 'damRallyPoint'; });
-  const crossingClosures = (markers || []).filter(function (m) { return m.type === 'damCrossingClosure'; });
+  // damCrossingClosure is in ROAD_CLOSURE_ACTION_TYPES, so BOTH a manual
+  // placement and an AI proposal store it in closedRoads -- never in
+  // markers. Looking only at markers meant this scenario's "Crossings
+  // closed" row read 0 no matter how many crossings the plan actually
+  // closed, by hand or from the AI.
+  const crossingClosures = (markers || [])
+    .filter(function (m) { return m.type === 'damCrossingClosure'; })
+    .concat((closedRoads || []).filter(function (r) {
+      return (r.actionType || 'closeRoad') === 'damCrossingClosure';
+    }));
 
   function pct(n) { return totalBuildings > 0 ? Math.round((n / totalBuildings) * 100) : 0; }
 
@@ -4342,10 +4476,25 @@ function computeDamReleaseResponseCoverage(scenario, geoData, markers, crossingC
 }
 
 function damReleaseImpactStatRows(cov) {
+  // Same {label, pct, value, detail} shape the other scenarios use, so
+  // the impact report renders one consistent before/after table instead
+  // of a sentence fragment per row and a raw "86 open, 0 closed" pair
+  // that cannot show a delta. suffix is kept for saved plans.
+  const crossPct = cov.crossings.total > 0
+    ? Math.round((cov.crossings.closed / cov.crossings.total) * 100) : 0;
   return [
-    { value: cov.evacuation.percent + '%', suffix: 'of at-risk population covered by a time-tiered evacuation zone' },
-    { value: cov.crossings.open + ' open, ' + cov.crossings.closed + ' closed', suffix: 'bridges/crossings within the affected reach' },
-    { value: cov.rally.percent + '%', suffix: 'of at-risk residents within reach of a high-ground rally point before the wave arrives' },
+    { label: 'Evacuation', pct: cov.evacuation.percent,
+      value: cov.evacuation.percent + '%',
+      detail: cov.evacuation.covered + ' of ' + cov.totalBuildings + ' at-risk buildings',
+      suffix: 'of at-risk population covered by a time-tiered evacuation zone' },
+    { label: 'Crossings closed', pct: crossPct,
+      value: crossPct + '%',
+      detail: cov.crossings.closed + ' of ' + cov.crossings.total + ' bridges / crossings',
+      suffix: 'bridges/crossings within the affected reach' },
+    { label: 'Rally-point reach', pct: cov.rally.percent,
+      value: cov.rally.percent + '%',
+      detail: cov.rally.covered + ' of ' + cov.totalBuildings + ' at-risk buildings',
+      suffix: 'of at-risk residents within reach of a high-ground rally point before the wave arrives' },
   ];
 }
 
@@ -4369,11 +4518,11 @@ function damReleaseImpactVerdict(after) {
   return { text: worst.text, tone: worst.pct >= 50 ? 'bad' : 'warn' };
 }
 
-function buildDamReleaseResponseImpact(scenario, geoData, markers) {
+function buildDamReleaseResponseImpact(scenario, geoData, markers, closedRoads) {
   const rules = getResponseRules(scenario);
   const crossingCandidates = damCrossingCandidates(geoData, rules);
-  const before = computeDamReleaseResponseCoverage(scenario, geoData, [], crossingCandidates);
-  const after = computeDamReleaseResponseCoverage(scenario, geoData, markers, crossingCandidates);
+  const before = computeDamReleaseResponseCoverage(scenario, geoData, [], crossingCandidates, []);
+  const after = computeDamReleaseResponseCoverage(scenario, geoData, markers, crossingCandidates, closedRoads);
   return {
     summaryLine: atRiskSummaryLine(after, 'the modeled wave-arrival zone'),
     before: { statRows: damReleaseImpactStatRows(before), mapOverlay: responseImpactMapOverlay(before) },
@@ -6242,7 +6391,13 @@ export default function PlanWorkspace() {
     const features = scenario.flooded_roads.map(function (coords, i) {
       return {
         type: 'Feature',
-        properties: { roadIndex: i, closed: closedRoads.some(function (r) { return r.roadIndex === i; }) },
+        properties: {
+          roadIndex: i,
+          // Same geometry-aware test as the impact report -- an AI-added
+          // closure has no roadIndex, so index-only matching left it red.
+          closed: roadClosedByAny({ type: 'Feature', properties: { roadIndex: i },
+                                    geometry: { type: 'LineString', coordinates: coords } }, closedRoads),
+        },
         geometry: { type: 'LineString', coordinates: coords },
       };
     });
@@ -7291,19 +7446,73 @@ export default function PlanWorkspace() {
           setCustomNotes(function (p) { return p.filter(function (n) { return n._uid !== targetUid; }); });
           break;
       }
+      // If this action came from an AI proposal, release that card too.
+      // Without this the marker vanished from the map while the card
+      // still read "Added to plan", so the user could neither see the
+      // action nor add it back -- the one thing Undo has to get right
+      // if someone is meant to drop their own attempt and apply the
+      // AI plan instead.
+      if (target.proposalKey) {
+        var release = function (prevKeys) {
+          var next = Object.assign({}, prevKeys);
+          delete next[target.proposalKey];
+          return next;
+        };
+        if (target.keySet === 'response') setAddedResponseProposalKeys(release);
+        else setAddedProposalKeys(release);
+      }
+
       return prev.slice(0, targetIdx).concat(prev.slice(targetIdx + 1));
     });
   }
 
+  // Clears the plan the user is actually looking at -- not both.
+  // This used to wipe markers, embankments, closures and notes for
+  // EVERY plan type, so pressing Clear on the Prevention tab silently
+  // deleted a finished Response plan on the other tab. It also left
+  // both AI proposal-card maps untouched, so every card still read
+  // "Added to plan" for actions that no longer existed and could not
+  // be added back.
   function clearAll() {
-    setMarkers([]);
-    setEmbankments([]);
-    setClosedRoads([]);
-    setCustomNotes([]);
-    setUndoStack([]);
-    setPreventionResult(null);
-    setBreakdownResult(null);
-    setShowBreakdown(false);
+    var target = planType;
+    var keep = function (item) { return item.planType !== target; };
+
+    setMarkers(function (prev) { return prev.filter(keep); });
+    setEmbankments(function (prev) { return prev.filter(keep); });
+    setClosedRoads(function (prev) { return prev.filter(keep); });
+    setCustomNotes(function (prev) { return prev.filter(keep); });
+
+    // Drop only this plan type's undo entries, by looking up what each
+    // one still points at. Entries whose object is already gone are
+    // dropped too -- they can never be undone again.
+    setUndoStack(function (prev) {
+      return prev.filter(function (entry) {
+        switch (entry.type) {
+          case 'marker':
+            return markers.some(function (m) { return m._uid === entry.uid && m.planType !== target; });
+          case 'embankment':
+            return embankments.some(function (e) { return e._uid === entry.uid && e.planType !== target; });
+          case 'closedRoad':
+            return closedRoads.some(function (r) { return r._uid === entry.uid && r.planType !== target; });
+          case 'customNote':
+            return customNotes.some(function (n) { return n._uid === entry.uid && n.planType !== target; });
+          default:
+            return false;
+        }
+      });
+    });
+
+    // Release this plan type's AI cards so the generated plan can be
+    // applied again straight after clearing a manual attempt.
+    if (target === 'response') {
+      setAddedResponseProposalKeys({});
+      setResponseImpactResult(null);
+    } else {
+      setAddedProposalKeys({});
+      setPreventionResult(null);
+      setBreakdownResult(null);
+      setShowBreakdown(false);
+    }
   }
 
   function buildPreventionActions() {
@@ -7461,7 +7670,10 @@ export default function PlanWorkspace() {
           cause_type: scenario.cause_type,
           water_level_m: scenario.water_level_m,
           existing_plan_actions: existingPlanActions,
-          max_proposals: 4,
+          // Room for a real multi-measure plan. The proposer now places
+          // several structures per zone; a cap of 4 truncated it back to
+          // the old one-or-two-action plan that showed no visible impact.
+          max_proposals: 20,
         }),
       });
       var data = await res.json();
@@ -7532,8 +7744,11 @@ export default function PlanWorkspace() {
   // a single "Add to plan" click would.
   function applyFullAiPlan() {
     if (!aiSuggestResult || !aiSuggestResult.proposals) return;
-    aiSuggestResult.proposals.forEach(function (p) {
-      var key = p.action_type + '_' + p.location.lon.toFixed(6) + '_' + p.location.lat.toFixed(6);
+    aiSuggestResult.proposals.forEach(function (p, i) {
+      // Index included so this matches PreventionPlanPanel's own
+      // proposalKeyFor exactly -- without it, Apply-all wrote keys the
+      // cards never read, so every card stayed on "Add to plan".
+      var key = p.action_type + '_' + p.location.lon.toFixed(6) + '_' + p.location.lat.toFixed(6) + '_' + i;
       if (!addedProposalKeys[key]) addAiProposalToPlan(p, key);
     });
   }
@@ -7554,7 +7769,12 @@ export default function PlanWorkspace() {
       return { type: m.type, lat: m.lat, lon: m.lon, params: m.params || {} };
     });
     closedRoads.forEach(function (r) {
-      actions.push({ type: 'closeRoad', lat: r.lat, lon: r.lon, road_u: r.roadU, road_v: r.roadV });
+      // Use the closure's OWN action type. Hard-coding 'closeRoad' sent
+      // a rainfall rainRoadClosure or a dam damCrossingClosure to the
+      // backend labelled as a river-overflow action, so the Hazard
+      // Reader could not match it against this scenario's own rules and
+      // treated an already-closed road as still open.
+      actions.push({ type: r.actionType || 'closeRoad', lat: r.lat, lon: r.lon, road_u: r.roadU, road_v: r.roadV });
     });
     return actions;
   }
@@ -7570,9 +7790,18 @@ export default function PlanWorkspace() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
+          cause_type: (scenario.params && scenario.params.cause_type) || scenario.cause_type,
           water_level_m: scenario.water_level_m,
+          // Rainfall gates every action on the real PMD band, not a
+          // modelled depth, so the band has to go with the request.
+          rainfall_band: (scenario.rainfall_band && scenario.rainfall_band.band) || null,
           existing_response_actions: buildExistingResponseActions(),
-          max_proposals: 4,
+          // Room for a real multi-action plan across both zones (up to
+          // 5 action types each). At 4 the plan could never place a
+          // boat launch or relief post, so the Impact Report's
+          // rescue-staging and relief/medical coverage were stuck at 0%
+          // however good the rest of the plan was.
+          max_proposals: 30,
         }),
       });
       var data = await res.json();
@@ -7591,15 +7820,55 @@ export default function PlanWorkspace() {
   // (already checked against the real placement rules -- no client-side
   // re-validation or re-computation needed), mirroring submitResponseAction's
   // own real record shapes exactly.
+  // The backend names response-action parameters in snake_case
+  // (ai_response_strategist._default_parameters: radius_m,
+  // coverage_radius_m) but every real placement in this file -- the
+  // form fields, the map circle rendering, and the Response Impact
+  // Report's own coverage maths -- reads the camelCase form keys
+  // (radiusM, coverageRadiusM). Copying the backend's params straight
+  // onto the marker therefore produced a marker whose radius was
+  // literally `undefined`: the AI's own report said 14% evacuation
+  // coverage while the placed zone covered 0 buildings and the impact
+  // report stayed at 0% -- "radius — undefined, no flooding inside this
+  // zone". Translate the keys so a proposal the AI validated is the
+  // SAME action a human click would have produced.
+  function aiParamsToFormParams(actionType, aiParams) {
+    var p = Object.assign({}, aiParams || {});
+    function rename(from, to) {
+      if (p[from] !== undefined && p[to] === undefined) p[to] = p[from];
+    }
+    rename('radius_m', 'radiusM');
+    rename('coverage_radius_m', 'coverageRadiusM');
+    rename('duration_hr', 'durationHr');
+    rename('boat_count', 'boatCount');
+    rename('shelter_capacity', 'shelterCapacity');
+    rename('medical_capacity', 'medicalCapacity');
+    rename('teams_available', 'teamsAvailable');
+    // Real defaults, matching each tool's own formField default, so an
+    // AI action can never land on the map with no radius at all even if
+    // the backend adds a new action type before this map is updated.
+    // Cover every scenario's equivalent action, not just river
+    // overflow's names -- a rainfall rainEvacZone or a dam damEvacZone
+    // with no radius renders as a zero-size circle covering nobody.
+    // Values mirror the backend's PLANNED_EVAC_RADIUS_M /
+    // PLANNED_WARNING_RADIUS_M so a placed marker matches what the AI
+    // actually planned and what the impact report measured.
+    if (['evacuationZone', 'rainEvacZone', 'damEvacZone'].indexOf(actionType) !== -1
+        && p.radiusM === undefined) p.radiusM = 800;
+    if (['warningPoint', 'rainWarning', 'damWarningPoint'].indexOf(actionType) !== -1
+        && p.coverageRadiusM === undefined) p.coverageRadiusM = 1200;
+    return p;
+  }
+
   function addAiResponseProposalToPlan(proposal, proposalKey) {
     var payload = proposal.validated_payload || {};
 
-    if (proposal.action_type === 'closeRoad') {
+    if (ROAD_CLOSURE_ACTION_TYPES.indexOf(proposal.action_type) !== -1) {
       var roadUid = nextUid();
       var closure = {
         _uid: roadUid,
         planType: 'response',
-        actionType: 'closeRoad',
+        actionType: proposal.action_type,
         roadIndex: null,
         lat: payload.lat,
         lon: payload.lon,
@@ -7612,14 +7881,26 @@ export default function PlanWorkspace() {
         aiGenerated: true,
       };
       setClosedRoads(function (prev) { return prev.concat([closure]); });
-      setUndoStack(function (prev) { return prev.concat([{ type: 'closedRoad', uid: roadUid }]); });
+      // Carry the AI proposal's key on the undo entry -- see undoLast.
+      setUndoStack(function (prev) { return prev.concat([{ type: 'closedRoad', uid: roadUid, proposalKey: proposalKey, keySet: 'response' }]); });
       playInterventionAnimation(mapRef.current, 'closeRoad', payload.lon, payload.lat);
       setAddedResponseProposalKeys(function (prev) { var next = Object.assign({}, prev); next[proposalKey] = true; return next; });
       return;
     }
 
-    var toolDef = RESPONSE_TOOLS.find(function (t) { return t.key === proposal.action_type; });
-    if (!toolDef) return;
+    // Look the action up across EVERY scenario's response tool list,
+    // not just river overflow's. This was RESPONSE_TOOLS only, so a
+    // drainage-failure or rainfall proposal (drainBlockageClearance,
+    // rainEvacZone, ...) found no toolDef and this function returned
+    // silently -- the "Add to plan" button appeared to do nothing at
+    // all, with no error anywhere, because the early return is
+    // indistinguishable from a click that never happened.
+    var toolDef = findResponseToolDef(proposal.action_type);
+    if (!toolDef) {
+      setToolError('That action type is not available for this scenario.');
+      setTimeout(function () { setToolError(null); }, 4000);
+      return;
+    }
     var marker = {
       _uid: nextUid(),
       planType: 'response',
@@ -7631,20 +7912,79 @@ export default function PlanWorkspace() {
       effectLabel: toolDef.effectLabel || null,
       lat: payload.lat,
       lon: payload.lon,
-      params: proposal.parameters,
+      params: aiParamsToFormParams(proposal.action_type, proposal.parameters),
       aiGenerated: true,
     };
-    if (payload.snapped_facility_name) marker.info = { 'Snapped to': payload.snapped_facility_name };
+    // The plan list renders each marker from marker.info using the SAME
+    // camelCase field names a manual placement produces (info.radiusM,
+    // info.buildingCount, ...). An AI marker previously carried none of
+    // them, so the summary rendered literally "NaNm radius · undefined
+    // buildings · no flooding inside this zone" for a zone the backend
+    // had actually measured. The backend already computes every one of
+    // these in compute_real_coverage_impact -- translate, don't recompute.
+    var cov = proposal.real_coverage || {};
+    var info = {};
+    // Grouped by the KIND of action, not one scenario's names -- the
+    // plan summary reads these camelCase fields for every scenario, so
+    // matching only 'evacuationZone'/'warningPoint'/'boatLaunch' left a
+    // rainfall or dam action with an empty info object and a summary
+    // line reading "NaNm radius / undefined buildings".
+    if (['evacuationZone', 'rainEvacZone', 'damEvacZone'].indexOf(proposal.action_type) !== -1) {
+      info.radiusM = cov.radius_m;
+      info.buildingCount = cov.buildings_covered;
+      info.maxDepthM = cov.max_depth_m;
+      info.floodedPercent = cov.flooded_percent;
+    } else if (['warningPoint', 'rainWarning', 'damWarningPoint'].indexOf(proposal.action_type) !== -1) {
+      info.radiusM = cov.radius_m;
+      info.buildingCount = cov.buildings_covered;
+      info.estimatedPeople = cov.estimated_people;
+    } else if (['boatLaunch', 'rainWaterRescue'].indexOf(proposal.action_type) !== -1) {
+      info.maxDepthNearbyM = cov.max_depth_nearby_m;
+      info.zoneClass = payload.zone_class;
+    } else if (['drainPumpDeployment', 'drainBlockageClearance', 'drainBypass',
+                'drainSewerOverflow', 'drainVectorControl'].indexOf(proposal.action_type) !== -1) {
+      info.depthM = payload.depth_m;
+      info.lowPointKind = payload.low_point_kind;
+    } else if (proposal.action_type === 'damRallyPoint') {
+      info.walkMinutes = payload.walk_minutes;
+      info.arrivalMinutes = payload.arrival_minutes;
+    }
+    // Every dam action carries the wave countdown its whole scenario is
+    // organised around, plus the distance the countdown is derived from.
+    // distanceFromDamKm was missing here while the plan summary calls
+    // info.distanceFromDamKm.toFixed(1) for damWarningPoint, damEvacZone
+    // and damCrossingClosure -- so applying an AI dam plan threw
+    // "Cannot read properties of undefined (reading 'toFixed')" and blanked
+    // the whole page. Same for dischargeCusecs, read via .toLocaleString().
+    // SYNC: response_validation_dam._arrival_payload.
+    if (payload.arrival_minutes !== undefined) info.arrivalMinutes = payload.arrival_minutes;
+    if (payload.tier !== undefined) info.tier = payload.tier;
+    if (payload.distance_from_dam_km !== undefined) info.distanceFromDamKm = payload.distance_from_dam_km;
+    if (payload.discharge_cusecs !== undefined) info.dischargeCusecs = payload.discharge_cusecs;
+    if (payload.snapped_facility_name) {
+      info.snappedFacilityName = payload.snapped_facility_name;
+      info['Snapped to'] = payload.snapped_facility_name;
+    }
+    // The AI's own stated reason for THIS placement, carried onto the
+    // marker so it is visible where the action lives (plan summary /
+    // marker details) instead of only in the proposal panel that
+    // disappears once the plan is applied.
+    if (proposal.ai_reasoning) info.aiReasoning = proposal.ai_reasoning;
+    if (proposal.zone_description) info.aiZone = proposal.zone_description;
+    marker.info = info;
     setMarkers(function (prev) { return prev.concat([marker]); });
-    setUndoStack(function (prev) { return prev.concat([{ type: 'marker', uid: marker._uid }]); });
+    setUndoStack(function (prev) { return prev.concat([{ type: 'marker', uid: marker._uid, proposalKey: proposalKey, keySet: 'response' }]); });
     playInterventionAnimation(mapRef.current, proposal.action_type, payload.lon, payload.lat);
     setAddedResponseProposalKeys(function (prev) { var next = Object.assign({}, prev); next[proposalKey] = true; return next; });
   }
 
   function applyFullAiResponsePlan() {
     if (!aiResponseResult || !aiResponseResult.proposals) return;
-    aiResponseResult.proposals.forEach(function (p) {
-      var key = p.action_type + '_' + p.location.lon.toFixed(6) + '_' + p.location.lat.toFixed(6);
+    aiResponseResult.proposals.forEach(function (p, i) {
+      // Index included so this matches ResponseComparisonPanel's own
+      // proposalKeyFor exactly -- without it Apply-all wrote keys the
+      // cards never read, so every card stayed on "Add to plan".
+      var key = p.action_type + '_' + p.location.lon.toFixed(6) + '_' + p.location.lat.toFixed(6) + '_' + i;
       if (!addedResponseProposalKeys[key]) addAiResponseProposalToPlan(p, key);
     });
   }
@@ -7707,7 +8047,7 @@ export default function PlanWorkspace() {
             aiGenerated: true,
           };
           setEmbankments(function (prev) { return prev.concat([embRecord]); });
-          setUndoStack(function (prev) { return prev.concat([{ type: 'embankment', uid: embUid }]); });
+          setUndoStack(function (prev) { return prev.concat([{ type: 'embankment', uid: embUid, proposalKey: proposalKey, keySet: 'prevention' }]); });
           playInterventionAnimation(mapRef.current, 'embankment', proposal.location.lon, proposal.location.lat);
           setAddedProposalKeys(function (prev) { var next = Object.assign({}, prev); next[proposalKey] = true; return next; });
         })
@@ -7731,10 +8071,32 @@ export default function PlanWorkspace() {
     }
 
     var payload = { lng: proposal.location.lon, lat: proposal.location.lat };
+
+    // Attach the real waterway this action sits on, exactly as a manual
+    // click does via resolvePlacement's findNearestWaterwaySegment.
+    // Without it every AI-added desilt/clearDrains reached the backend
+    // with target_waterway_id = null, and flood_engine.compute_capacity_gain
+    // SKIPS any capacity action that has no waterway id -- so the whole
+    // AI prevention plan scored a runoff coefficient of 0.6 -> 0.6 and
+    // the impact report honestly showed no change at all.
+    //
+    // The point is NOT moved: it already passed the same real placement
+    // rules a click faces, and bank-anchored actions are deliberately
+    // offset from the channel. Only the id is looked up, with a reach
+    // wide enough to cover those offsets.
+    var WATERWAY_LINKED_TARGET_TYPES = ['waterway', 'waterwayWithRoom', 'waterwayBank'];
+    if (WATERWAY_LINKED_TARGET_TYPES.indexOf(toolDef.targetType) >= 0) {
+      var snap = findNearestWaterwaySegment(payload, buildGeoData().waterwaysGeoJSON, 120);
+      if (snap.accepted) {
+        payload.targetWaterwayId = snap.waterwayId;
+        payload.targetSegmentName = snap.segmentName;
+      }
+    }
+
     var marker = buildMarker(toolDef, payload, params, 'prevention');
     marker.aiGenerated = true;
     setMarkers(function (prev) { return prev.concat([marker]); });
-    setUndoStack(function (prev) { return prev.concat([{ type: 'marker', uid: marker._uid }]); });
+    setUndoStack(function (prev) { return prev.concat([{ type: 'marker', uid: marker._uid, proposalKey: proposalKey, keySet: 'prevention' }]); });
     playInterventionAnimation(mapRef.current, toolDef.key, proposal.location.lon, proposal.location.lat);
     setAddedProposalKeys(function (prev) { var next = Object.assign({}, prev); next[proposalKey] = true; return next; });
   }
@@ -7825,7 +8187,7 @@ export default function PlanWorkspace() {
       : causeType === 'drainage_failure'
         ? buildDrainageFailureResponseImpact(scenario, geoData, responseMarkers)
         : causeType === 'dam_release'
-          ? buildDamReleaseResponseImpact(scenario, geoData, responseMarkers)
+          ? buildDamReleaseResponseImpact(scenario, geoData, responseMarkers, closedRoads)
           : buildRiverOverflowResponseImpact(scenario, geoData, responseMarkers, closedRoads);
     setResponseImpactResult(result);
     savePlanIfLoggedIn('response', result);
@@ -8550,16 +8912,30 @@ export default function PlanWorkspace() {
             </div>
           )}
 
-          <ResponseComparisonPanel
-            aiResponseLoading={aiResponseLoading}
-            aiResponseResult={aiResponseResult}
-            aiResponseError={aiResponseError}
-            addedProposalKeys={addedResponseProposalKeys}
-            onRun={runAiResponseCompare}
-            onAddProposal={addAiResponseProposalToPlan}
-            onApplyFullPlan={applyFullAiResponsePlan}
-            onDismiss={function () { setAiResponseResult(null); setAiResponseError(null); }}
-          />
+          {AI_RESPONSE_SUPPORTED_CAUSE_TYPES.indexOf(causeType) !== -1 ? (
+            <ResponseComparisonPanel
+              aiResponseLoading={aiResponseLoading}
+              aiResponseResult={aiResponseResult}
+              aiResponseError={aiResponseError}
+              addedProposalKeys={addedResponseProposalKeys}
+              onRun={runAiResponseCompare}
+              onAddProposal={addAiResponseProposalToPlan}
+              onApplyFullPlan={applyFullAiResponsePlan}
+              onDismiss={function () { setAiResponseResult(null); setAiResponseError(null); }}
+            />
+          ) : (
+            // Only river_overflow has real response validation rules
+            // ported on the backend -- showing the button for a
+            // scenario without them would let it silently run another
+            // scenario's rules against this one's data, producing
+            // real-looking proposals never checked against the right
+            // physics. All four scenarios are ported now, so this
+            // branch is a guard for any future cause type rather than
+            // something a user should normally see.
+            <div style={{ marginTop: 14, padding: 9, borderRadius: 10, background: '#fefce8', border: '1px solid #fde68a', color: '#92400e', fontSize: 10.5, fontWeight: 600, lineHeight: 1.4 }}>
+              ⚠️ AI Response Plan is not available for this scenario. {scenarioLabel(scenario)} doesn&apos;t have real response validation rules ported yet.
+            </div>
+          )}
         </div>
         )}
 
@@ -8732,40 +9108,56 @@ export default function PlanWorkspace() {
           )}
         </div>
 
-        <div style={{ display: 'flex', gap: 6, marginTop: 12 }}>
-          <button
-            onClick={undoLast}
-            style={{
-              flex: 1,
-              padding: '7px',
-              borderRadius: 9,
-              border: '1px solid #3E5C56',
-              background: '#062D29',
-              color: '#DCEFE9',
-              fontSize: 11.5,
-              fontWeight: 600,
-              cursor: 'pointer',
-            }}
-          >
-            Undo
-          </button>
-          <button
-            onClick={clearAll}
-            style={{
-              flex: 1,
-              padding: '7px',
-              borderRadius: 9,
-              border: '1px solid #FF5A36',
-              background: '#062D29',
-              color: '#FF5A36',
-              fontSize: 11.5,
-              fontWeight: 600,
-              cursor: 'pointer',
-            }}
-          >
-            Clear
-          </button>
-        </div>
+        {(function () {
+          // Both buttons act on the plan currently open, so say which one
+          // and go dead when there is nothing of it to act on -- a live
+          // "Clear" on an empty prevention plan looked like it had failed
+          // when it was really doing nothing.
+          var inThisPlan = function (item) { return item.planType === planType; };
+          var count = markers.filter(inThisPlan).length +
+                      embankments.filter(inThisPlan).length +
+                      closedRoads.filter(inThisPlan).length +
+                      customNotes.filter(inThisPlan).length;
+          var planWord = planType === 'response' ? 'response' : 'prevention';
+          var disabledStyle = { opacity: 0.4, cursor: 'not-allowed' };
+          var base = {
+            flex: 1, padding: '7px', borderRadius: 9, background: '#062D29',
+            fontSize: 11.5, fontWeight: 600, cursor: 'pointer',
+          };
+          return (
+            <div style={{ marginTop: 12 }}>
+              <div style={{ display: 'flex', gap: 6 }}>
+                <button
+                  onClick={undoLast}
+                  disabled={count === 0}
+                  title={'Remove the last action added to this ' + planWord + ' plan'}
+                  style={Object.assign({}, base,
+                    { border: '1px solid #3E5C56', color: '#DCEFE9' },
+                    count === 0 ? disabledStyle : null)}
+                >
+                  Undo last
+                </button>
+                <button
+                  onClick={clearAll}
+                  disabled={count === 0}
+                  title={'Remove every action from this ' + planWord + ' plan'}
+                  style={Object.assign({}, base,
+                    { border: '1px solid #FF5A36', color: '#FF5A36' },
+                    count === 0 ? disabledStyle : null)}
+                >
+                  Clear {planWord} plan
+                </button>
+              </div>
+              <div style={{ fontSize: 10, color: '#7FA69C', marginTop: 5, textAlign: 'center' }}>
+                {count === 0
+                  ? 'Nothing placed on this ' + planWord + ' plan yet.'
+                  : count + ' action' + (count === 1 ? '' : 's') + ' on this ' + planWord +
+                    ' plan · your ' + (planType === 'response' ? 'prevention' : 'response') +
+                    ' plan is untouched'}
+              </div>
+            </div>
+          );
+        })()}
 
         {planType === 'prevention' && (function () {
           var prevMarkerCount = markers.filter(function (m) { return m.planType === 'prevention'; }).length;
@@ -8938,7 +9330,7 @@ export default function PlanWorkspace() {
           const matching = currentMarkers.filter(function (m) { return m.type === t.key; });
           if (matching.length === 0) return null;
           return (
-            <div key={t.key} style={{ fontSize: 12, color: '#334155', marginBottom: 5 }}>
+            <div key={t.key} style={{ fontSize: 12, color: '#F2F8F5', marginBottom: 5 }}>
               {t.emoji} <b>{matching.length}</b> × {t.label}
               {matching.map(function (m, i) {
                 const info = m.info || {};
@@ -9037,15 +9429,15 @@ export default function PlanWorkspace() {
                   lines.push(formatDepth(info.originDepthM) + ' at origin → ' + formatDepth(info.destDepthM) + ' at bypass target');
                   lines.push(Math.round(info.distanceM) + 'm bypass path');
                 } else if (t.key === 'damWarningPoint') {
-                  lines.push(info.distanceFromDamKm.toFixed(1) + 'km from Rawal Dam · ' + formatCountdown(info.arrivalMinutes));
-                  lines.push(info.dischargeCusecs.toLocaleString() + ' cusecs');
+                  lines.push(fmtNum(info.distanceFromDamKm, 1) + 'km from Rawal Dam · ' + formatCountdown(info.arrivalMinutes));
+                  lines.push(fmtNum(info.dischargeCusecs) + ' cusecs');
                   if (info.snappedFacilityName) lines.push('at ' + info.snappedFacilityName);
                 } else if (t.key === 'damEvacZone') {
                   lines.push(tierLabel(info.tier) + ' · ' + formatCountdown(info.arrivalMinutes) + ' until the water arrives');
-                  lines.push(info.distanceFromDamKm.toFixed(1) + 'km from Rawal Dam');
+                  lines.push(fmtNum(info.distanceFromDamKm, 1) + 'km from Rawal Dam');
                 } else if (t.key === 'damCrossingClosure') {
                   lines.push('⚠️ current/velocity hazard — ' + formatCountdown(info.arrivalMinutes));
-                  lines.push(info.distanceFromDamKm.toFixed(1) + 'km from Rawal Dam');
+                  lines.push(fmtNum(info.distanceFromDamKm, 1) + 'km from Rawal Dam');
                 } else if (t.key === 'damRallyPoint') {
                   lines.push(Math.round(info.walkMinutes) + 'min walk from the nullah · wave in ' + formatCountdown(info.arrivalMinutes));
                   lines.push(Math.round(info.arrivalMinutes - info.walkMinutes) + 'min safety margin');
@@ -9066,6 +9458,14 @@ export default function PlanWorkspace() {
                     {lines.map(function (line, li) {
                       return <div key={li} style={{ color: '#64748b' }}>{line}</div>;
                     })}
+                    {info.aiReasoning && (
+                      <div
+                        title={info.aiZone ? 'Zone: ' + info.aiZone : undefined}
+                        style={{ marginTop: 4, paddingTop: 4, borderTop: '1px dashed #3E5C56', color: '#DCEFE9', fontStyle: 'italic', lineHeight: 1.4 }}
+                      >
+                        ✨ {info.aiReasoning}
+                      </div>
+                    )}
                   </div>
                 );
               })}
@@ -9083,7 +9483,7 @@ export default function PlanWorkspace() {
             .map(function (m) { return formatParams(t, m.params); })
             .filter(Boolean);
           return (
-            <div key={t.key} style={{ fontSize: 12, color: '#334155', marginBottom: 5 }}>
+            <div key={t.key} style={{ fontSize: 12, color: '#F2F8F5', marginBottom: 5 }}>
               {t.emoji} <b>{matching.length}</b> × {t.label}
               {segmentNames.length > 0 && (
                 <div style={{ fontSize: 10, color: '#94a3b8', marginLeft: 20 }}>
@@ -9108,7 +9508,7 @@ export default function PlanWorkspace() {
             .map(function (m) { return formatParams(t, m.params); })
             .filter(Boolean);
           return (
-            <div key={t.key} style={{ fontSize: 12, color: '#334155', marginBottom: 5 }}>
+            <div key={t.key} style={{ fontSize: 12, color: '#F2F8F5', marginBottom: 5 }}>
               {t.emoji} <b>{matching.length}</b> × {t.label}
               {paramLines.length > 0 && paramLines.slice(0, 3).map(function (p, i) {
                 return (
@@ -9218,6 +9618,120 @@ export default function PlanWorkspace() {
               </div>
             </div>
 
+            {/* Protection coverage -- the metric a prevention plan actually
+                moves, and the one this report used to be missing. The flood
+                extent numbers above are real and will barely budge (a pond
+                holds thousands of m3 against a catchment holding millions),
+                which is why the report kept reading as "this plan does
+                nothing". Every number here comes from the backend's
+                prevention_coverage.compute_coverage -- real exposed
+                buildings, real cut road segments, real per-action service
+                reaches. Nothing is computed in this component. */}
+            {preventionResult.coverage && preventionResult.coverage.at_risk_buildings > 0 && (function () {
+              var cov = preventionResult.coverage;
+              var rows = [
+                {
+                  label: 'Flood-exposed buildings protected',
+                  after: cov.protected_percent_after,
+                  detail: cov.protected_after + ' of ' + cov.at_risk_buildings +
+                          ' buildings now inside a measure’s service reach',
+                },
+                {
+                  label: 'Flood-cut road segments covered',
+                  after: cov.cut_roads_percent_after,
+                  detail: cov.cut_roads_covered + ' of ' + cov.cut_roads_total +
+                          ' cut segments now have a measure within reach',
+                },
+              ];
+              return (
+                <div style={{
+                  background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: 12,
+                  padding: 14, marginBottom: 10,
+                }}>
+                  <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: 0.4,
+                                textTransform: 'uppercase', color: '#047857', marginBottom: 10 }}>
+                    Protection coverage &mdash; before vs after
+                  </div>
+                  {rows.map(function (r) {
+                    return (
+                      <div key={r.label} style={{ marginBottom: 12 }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between',
+                                      alignItems: 'baseline', gap: 8, marginBottom: 5 }}>
+                          <span style={{ fontSize: 12, fontWeight: 700, color: '#065f46' }}>{r.label}</span>
+                          <span style={{ fontSize: 12, color: '#64748b' }}>
+                            <b style={{ color: '#94a3b8' }}>0%</b>
+                            <span style={{ margin: '0 5px' }}>&rarr;</span>
+                            <b style={{ fontSize: 16, color: '#059669' }}>{r.after}%</b>
+                          </span>
+                        </div>
+                        <div style={{ height: 8, borderRadius: 999, background: '#dcfce7', overflow: 'hidden' }}>
+                          <div style={{ height: '100%', width: Math.min(100, r.after) + '%',
+                                        background: '#059669', borderRadius: 999 }} />
+                        </div>
+                        <div style={{ fontSize: 11, color: '#64748b', marginTop: 4 }}>{r.detail}</div>
+                      </div>
+                    );
+                  })}
+                  {/* Flood actually removed, stated at BOTH scales so
+                      neither one misleads. Basin-wide is the honest
+                      headline and barely moves; the local figure is the
+                      same two flood masks restricted to the ground the
+                      plan actually raised, which is where a pond or a
+                      widened reach can do anything at all. Both come
+                      from the backend (prevention_coverage.
+                      local_flood_reduction) -- nothing computed here. */}
+                  {(function () {
+                    var lfr = preventionResult.after && preventionResult.after.local_flood_reduction;
+                    if (!lfr) return null;
+                    return (
+                      <div style={{ borderTop: '1px solid #bbf7d0', paddingTop: 10, marginBottom: 10 }}>
+                        <div style={{ fontSize: 11, fontWeight: 700, color: '#065f46', marginBottom: 6 }}>
+                          Flooding on the ground this plan protects
+                        </div>
+                        {/* The reduction IS the headline -- "flooding cut
+                            by 18%" is the sentence, and the two states it
+                            is derived from sit underneath as evidence
+                            rather than competing with it. */}
+                        <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' }}>
+                          <span style={{ fontSize: 34, fontWeight: 900, color: '#059669', lineHeight: 1 }}>
+                            {lfr.reduction_percent}%
+                          </span>
+                          <span style={{ fontSize: 13, fontWeight: 700, color: '#065f46' }}>
+                            of the flooding here is gone
+                          </span>
+                        </div>
+                        <div style={{ fontSize: 11.5, color: '#475569', marginTop: 7 }}>
+                          This ground was{' '}
+                          <b style={{ color: '#dc2626' }}>{lfr.flooded_percent_before}% under water</b>
+                          {' '}before the plan and{' '}
+                          <b style={{ color: '#059669' }}>{lfr.flooded_percent_after}% after</b>
+                          {' '}&mdash; {Number(lfr.drained_m2).toLocaleString()} m² of the
+                          {' '}{Number(lfr.zone_area_m2).toLocaleString()} m² these measures serve is now dry.
+                        </div>
+                        <div style={{ fontSize: 10.5, color: '#64748b', marginTop: 4, opacity: 0.85 }}>
+                          Across the whole study area the change is
+                          {' '}{preventionResult.before.flooded_percent}% &rarr; {preventionResult.after.flooded_percent}%
+                          {' '}&mdash; small because almost none of that area is near a measure, not because the measures failed.
+                        </div>
+                      </div>
+                    );
+                  })()}
+
+                  <div style={{ fontSize: 11, color: '#64748b', borderTop: '1px solid #bbf7d0', paddingTop: 8 }}>
+                    {cov.measures_counted} protective measure{cov.measures_counted === 1 ? '' : 's'} counted
+                    {cov.treated_channel_m > 0 && (
+                      <span> &middot; {Math.round(cov.treated_channel_m).toLocaleString()}m of channel
+                        desilted/cleared ({cov.treated_channel_percent}% of the {Math.round(cov.total_channel_m / 1000)}km network)</span>
+                    )}
+                    <div style={{ marginTop: 4, opacity: 0.85 }}>
+                      &ldquo;Exposed&rdquo; = ground at or below the flood level plus {cov.freeboard_m}m freeboard.
+                      Coverage is 0% before the plan because no measure exists yet &mdash; not a chosen baseline.
+                    </div>
+                  </div>
+                </div>
+              );
+            })()}
+
             {(function () {
               var impact = deriveImpact(preventionResult.before, preventionResult.after);
               var goodColor = '#059669';
@@ -9233,7 +9747,9 @@ export default function PlanWorkspace() {
                     color: '#64748b',
                     marginBottom: 8,
                   }}>
-                    No measurable improvement at this scale — the flood extent, roads and buildings are unchanged.
+                    Basin-wide flood extent, roads and buildings are unchanged &mdash; expected at this
+                    scale, since no local measure can lower a whole catchment&apos;s flood stage.
+                    The protection coverage above is what this plan actually changes.
                   </div>
                 );
               }
@@ -9493,7 +10009,9 @@ export default function PlanWorkspace() {
                   </div>
                   {!hasEffect && (
                     <div style={{ fontSize: 11, color: '#64748b', marginBottom: 16, padding: '0 4px' }}>
-                      No measurable improvement at this scale — the combined plan doesn&apos;t change flood extent, roads or buildings.
+                      Basin-wide flood extent, roads and buildings are unchanged &mdash; expected, since no
+                      local measure lowers a whole catchment&apos;s flood stage. See the protection coverage
+                      on the impact report for what this plan does change.
                     </div>
                   )}
                 </>

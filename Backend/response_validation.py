@@ -22,10 +22,10 @@ silently approximated here.
 import math
 
 import numpy as np
-from shapely.geometry import Point, LineString
+from shapely.geometry import Point, LineString, box
 
 import flood_engine
-from prevention_validation import distance_m, _project_local
+from prevention_validation import distance_m, _project_local, _m_per_deg_lon, M_PER_DEG_LAT
 
 # Mirrors PlanWorkspace.js RESPONSE_RULES.river_overflow exactly (see
 # that file for the reasoning behind each number -- duplicated here only
@@ -85,6 +85,25 @@ def action_coverage_radius_m(action):
     if atype == "boatLaunch":
         return RESCUE_STAGING_REACH_M
     if atype == "reliefMedicalPost":
+        return RELIEF_MEDICAL_REACH_M
+
+    # Rainfall's own action types. Without these they fell through to
+    # 0.0, which made covered_by_any_marker count ZERO buildings for a
+    # perfectly valid rainfall plan -- every coverage row in the
+    # rainfall impact report sat at 0% no matter what was placed.
+    # Same real reaches as their river-overflow equivalents, so the two
+    # scenarios' reports are measured on the same footing.
+    if atype == "rainWarning":
+        v = params.get("coverage_radius_m", params.get("coverageRadiusM"))
+        return float(v) if v is not None else DEFAULT_WARNING_RADIUS_M
+    if atype == "rainEvacZone":
+        v = params.get("radius_m", params.get("radiusM"))
+        return float(v) if v is not None else DEFAULT_EVAC_RADIUS_M
+    if atype == "rainRoadClosure":
+        return RULES["ROAD_SNAP_MAX_M"]
+    if atype == "rainWaterRescue":
+        return RESCUE_STAGING_REACH_M
+    if atype in ("rainMedicalPost", "rainReliefCamp"):
         return RELIEF_MEDICAL_REACH_M
     return 0.0
 
@@ -203,24 +222,91 @@ def point_on_safe_ground(lat, lon, depth_grid, meta, clearance_m=None):
 # Nearest road / facility / building-count -- ports nearestRoad,
 # nearestFacility, countBuildingsWithin.
 # ---------------------------------------------------------------------
-def nearest_road(lat, lon, max_distance_m, roads_geojson):
-    if not roads_geojson or not roads_geojson.get("features"):
-        return {"found": False, "data_missing": True, "distance_m": None}
+# Prepared road geometry + a spatial index, per roads_geojson object.
+# nearest_road used to build a shapely LineString AND a locally-projected
+# copy of it for EVERY one of the ~11,500 road features on EVERY call.
+# That is fine when a call happens once per placement, and catastrophic
+# when a candidate generator calls it once per facility: relief/medical
+# candidate generation for a single hazard zone measured 2,871 SECONDS.
+# Same fix prevention_validation already uses for its own geometry.
+_road_index_cache = {}
 
-    point = Point(lon, lat)
-    p_local = _project_local(point, lat)
-    best = None
+
+def _road_index(roads_geojson):
+    key = id(roads_geojson)
+    cached = _road_index_cache.get(key)
+    if cached is not None:
+        return cached
+
+    from shapely.strtree import STRtree
+
+    lines, feats = [], []
     for feature in roads_geojson["features"]:
         geom = feature.get("geometry")
         if not geom or geom["type"] != "LineString":
             continue
-        line = LineString(geom["coordinates"])
-        line_local = _project_local(line, lat)
-        d = p_local.distance(line_local)
-        if best is None or d < best["distance_m"]:
-            frac = line_local.project(p_local, normalized=True)
-            nearest_pt = line.interpolate(frac, normalized=True)
-            best = {"distance_m": d, "lon": nearest_pt.x, "lat": nearest_pt.y, "feature": feature}
+        try:
+            lines.append(LineString(geom["coordinates"]))
+        except Exception:
+            continue
+        feats.append(feature)
+
+    tree = STRtree(lines) if lines else None
+    _road_index_cache.clear()  # only ever one roads layer in a process
+    _road_index_cache[key] = (lines, feats, tree)
+    return _road_index_cache[key]
+
+
+def nearest_road(lat, lon, max_distance_m, roads_geojson):
+    if not roads_geojson or not roads_geojson.get("features"):
+        return {"found": False, "data_missing": True, "distance_m": None}
+
+    lines, feats, tree = _road_index(roads_geojson)
+    if tree is None:
+        return {"found": False, "data_missing": True, "distance_m": None}
+
+    point = Point(lon, lat)
+    p_local = _project_local(point, lat)
+
+    # Look only at roads whose bbox is near the point, growing the search
+    # radius until the winner is provably inside it. A bbox query of
+    # radius r returns every geometry lying within r of the point, so
+    # once the best distance found is <= r the answer is exactly the
+    # global nearest -- the same road the old full scan returned,
+    # including when it sits beyond max_distance_m (callers read
+    # `distance_m` to explain WHY a placement was refused, so that
+    # number still has to be the real one). Stopping at the first
+    # non-empty query instead of this loop silently returned a farther
+    # road: 2 of 40 probe points came back 100m -> 114m.
+    m_per_lon = max(_m_per_deg_lon(lat), 1e-9)
+
+    def _scan(radius_m):
+        dlat = radius_m / M_PER_DEG_LAT
+        dlon = radius_m / m_per_lon
+        found = None
+        for i in tree.query(box(lon - dlon, lat - dlat, lon + dlon, lat + dlat)):
+            line = lines[i]
+            line_local = _project_local(line, lat)
+            d = p_local.distance(line_local)
+            if found is None or d < found["distance_m"]:
+                frac = line_local.project(p_local, normalized=True)
+                nearest_pt = line.interpolate(frac, normalized=True)
+                found = {"distance_m": d, "lon": nearest_pt.x, "lat": nearest_pt.y,
+                         "feature": feats[i]}
+        return found
+
+    radius = max(float(max_distance_m or 0.0), 50.0)
+    best = _scan(radius)
+    # Grow until the winner is inside the radius that found it.
+    for _ in range(12):
+        if best is not None and best["distance_m"] <= radius:
+            break
+        radius *= 4.0
+        grown = _scan(radius)
+        if grown is not None:
+            best = grown
+        elif best is None and radius > 200000.0:
+            break
 
     if best is None:
         return {"found": False, "data_missing": True, "distance_m": None}
@@ -531,7 +617,7 @@ VALIDATORS = {
 }
 
 
-def build_context(water_level_m, roads_geojson, existing_plan_actions=None):
+def build_context(water_level_m, roads_geojson, existing_plan_actions=None, cause_type="river_overflow", rainfall_band=None):
     """Assembles the shared ctx dict every validator above reads, from
     real backend data sources -- the same sources /flood-depth-grid,
     prevention_validation.load_roads_geojson, and the AI Hazard Analyst
@@ -545,5 +631,10 @@ def build_context(water_level_m, roads_geojson, existing_plan_actions=None):
         "facilities_geojson": flood_engine.load_facilities(),
         "buildings_geojson": load_buildings_geojson(),
         "existing_closed_roads": [a for a in existing_plan_actions if a.get("type") == "closeRoad"],
-        "existing_evac_zones": [a for a in existing_plan_actions if a.get("type") == "evacuationZone"],
+        "existing_evac_zones": [a for a in existing_plan_actions if a.get("type") in ("evacuationZone", "rainEvacZone")],
+        # Which scenario this context belongs to, so the Strategist and
+        # Impact Evaluator pick the right rule set / at-risk definition
+        # instead of assuming river_overflow.
+        "cause_type": cause_type,
+        "rainfall_band": rainfall_band,
     }

@@ -59,9 +59,24 @@ def load_roads_geojson():
             ]
         if len(coords) < 2:
             continue
+        # Carry the graph's real highway class and name through. They
+        # were being dropped, so every road in this GeoJSON looked
+        # untyped and unnamed: nearest_road always fell back to
+        # highway_type "road", and any check that depends on road CLASS
+        # could never pass -- drainage failure's culvert clearance
+        # requires a trunk/primary/secondary crossing, so it matched
+        # zero roads out of 11,467 and could never be proposed at all.
+        # The graph itself has both (516 secondary / 261 primary edges,
+        # 7,793 named), they simply were not being copied.
+        highway = data.get("highway")
+        if isinstance(highway, list):
+            highway = highway[0] if highway else None
+        name = data.get("name")
+        if isinstance(name, list):
+            name = name[0] if name else None
         features.append({
             "type": "Feature",
-            "properties": {"u": int(u), "v": int(v)},
+            "properties": {"u": int(u), "v": int(v), "highway": highway, "name": name},
             "geometry": {"type": "LineString", "coordinates": coords},
         })
     _roads_geojson_cache = {"type": "FeatureCollection", "features": features}
@@ -100,6 +115,64 @@ def distance_m(lon1, lat1, lon2, lat2):
     return math.sqrt(dx * dx + dy * dy)
 
 
+# ---------------------------------------------------------------------
+# Geometry cache + bbox pruning (pure speed, no behaviour change).
+#
+# Every validation used to re-run shape(geom) AND _project_local(geom)
+# for all ~4,900 buildings and ~215 waterways, on every single call --
+# a real measured 8-14 SECONDS per candidate check. That, not the LLM,
+# was what made an AI Prevention run blow its whole time budget after
+# only one or two candidates: one attempt cost ~1 LLM call plus ~12s of
+# pure geometry re-parsing.
+#
+# Two changes, both exactness-preserving:
+#   1. Parse each FeatureCollection into shapely ONCE and reuse it. The
+#      collections are themselves module-level cached loads
+#      (load_roads_geojson / flood_engine.load_buildings etc.), so
+#      keying the cache on id() is stable for the process lifetime.
+#   2. Prune with a bbox lower bound before doing the expensive exact
+#      projection. _bbox_lower_bound_m is ALWAYS <= the true distance,
+#      so anything it prunes genuinely could not have changed the
+#      answer -- this is a branch-and-bound speedup, not an
+#      approximation.
+# ---------------------------------------------------------------------
+_geom_index_cache = {}
+
+
+def _feature_index(geojson):
+    """Cached [(feature, shapely_geom, bounds)] for one FeatureCollection."""
+    key = id(geojson)
+    cached = _geom_index_cache.get(key)
+    if cached is not None:
+        return cached
+    entries = []
+    for feature in (geojson or {}).get("features", []):
+        geom = feature.get("geometry")
+        if not geom:
+            continue
+        try:
+            g = shape(geom)
+        except Exception:
+            continue
+        entries.append((feature, g, g.bounds))
+    _geom_index_cache[key] = entries
+    return entries
+
+
+def _bbox_lower_bound_m(lon, lat, bounds):
+    """Lower bound, in meters, on the distance from (lon,lat) to ANY
+    point inside `bounds`. Never overestimates, so it is safe to prune
+    with. Returns 0.0 when the point is inside the bbox."""
+    minx, miny, maxx, maxy = bounds
+    dx_deg = (minx - lon) if lon < minx else ((lon - maxx) if lon > maxx else 0.0)
+    dy_deg = (miny - lat) if lat < miny else ((lat - maxy) if lat > maxy else 0.0)
+    if dx_deg == 0.0 and dy_deg == 0.0:
+        return 0.0
+    dx = dx_deg * _m_per_deg_lon(lat)
+    dy = dy_deg * M_PER_DEG_LAT
+    return math.sqrt(dx * dx + dy * dy)
+
+
 def _feature_distance_m(point, feature):
     """Real distance in meters from a shapely Point to one GeoJSON
     feature's geometry (Point/LineString/MultiLineString/Polygon/
@@ -127,11 +200,19 @@ def nearest_line_distance_m(point, lines_geojson):
     turf.nearestPointOnLine run against a whole waterways/roads
     FeatureCollection."""
     best_m = None
-    for feature in lines_geojson.get("features", []):
-        geom = feature.get("geometry")
-        if not geom or geom["type"] not in ("LineString", "MultiLineString"):
+    lon, lat = point.x, point.y
+    for feature, geom_obj, bounds in _feature_index(lines_geojson):
+        gtype = feature.get("geometry", {}).get("type")
+        if gtype not in ("LineString", "MultiLineString"):
             continue
-        d = _feature_distance_m(point, feature)
+        # Exact branch-and-bound: if even the closest point of this
+        # feature's bbox is farther than the best distance found so far,
+        # the feature itself cannot beat it.
+        if best_m is not None and _bbox_lower_bound_m(lon, lat, bounds) >= best_m:
+            continue
+        p_local = _project_local(point, lat)
+        g_local = _project_local(geom_obj, lat)
+        d = p_local.distance(g_local)
         if best_m is None or d < best_m:
             best_m = d
     return best_m
@@ -158,20 +239,34 @@ def check_point_constraints(lon, lat, config, waterways_geojson, buildings_geojs
     # 1. Building checks
     if buildings_geojson and buildings_geojson.get("features"):
         found_building_hit = False
-        for feature in buildings_geojson["features"]:
+        building_clearance = config.get("buildingClearance")
+        for feature, geom_obj, bounds in _feature_index(buildings_geojson):
             geom = feature.get("geometry")
             if not geom:
                 continue
             gtype = geom["type"]
 
-            if gtype == "Point" and config.get("buildingClearance"):
+            # Safe prunes. Polygons here are only ever tested with
+            # contains() -- never a distance -- so any polygon whose
+            # bbox does not contain the point cannot match. Points are
+            # only tested against buildingClearance, so one whose bbox
+            # lower bound already meets the clearance cannot violate it.
+            lower_bound = _bbox_lower_bound_m(lon, lat, bounds)
+            if gtype in ("Polygon", "MultiPolygon"):
+                if lower_bound > 0:
+                    continue
+            elif gtype == "Point":
+                if not building_clearance or lower_bound >= building_clearance:
+                    continue
+
+            if gtype == "Point" and building_clearance:
                 blon, blat = geom["coordinates"]
                 distance = distance_m(lon, lat, blon, blat)
-                if distance < config["buildingClearance"]:
+                if distance < building_clearance:
                     return False, f"is only {round(distance)}m from a building", extra
 
             elif gtype in ("Polygon", "MultiPolygon"):
-                poly = shape(geom)
+                poly = geom_obj
                 if poly.contains(point):
                     found_building_hit = True
                     if config.get("requireOnBuilding"):
@@ -210,19 +305,26 @@ def check_point_constraints(lon, lat, config, waterways_geojson, buildings_geojs
 
     # 4. Existing water body check (retention pond)
     if config.get("checkExistingWater") and water_bodies_geojson and water_bodies_geojson.get("features"):
-        for feature in water_bodies_geojson["features"]:
+        for feature, geom_obj, bounds in _feature_index(water_bodies_geojson):
             geom = feature.get("geometry")
             if not geom or geom["type"] not in ("Polygon", "MultiPolygon"):
                 continue
-            if shape(geom).contains(point):
+            # contains() only -- a bbox that excludes the point cannot contain it.
+            if _bbox_lower_bound_m(lon, lat, bounds) > 0:
+                continue
+            if geom_obj.contains(point):
                 return False, "is already on an existing water body — no need to build a pond here", extra
 
     # 5. Building proximity check (widen channel -- is there room?)
     require_no_building_nearby = config.get("requireNoBuildingNearby")
     if require_no_building_nearby and buildings_geojson and buildings_geojson.get("features"):
-        for feature in buildings_geojson["features"]:
+        for feature, geom_obj, bounds in _feature_index(buildings_geojson):
             geom = feature.get("geometry")
             if not geom:
+                continue
+            # Safe prune: nothing whose bbox is already at/over the
+            # required clearance can come in under it.
+            if _bbox_lower_bound_m(lon, lat, bounds) >= require_no_building_nearby:
                 continue
             gtype = geom["type"]
             if gtype == "Point":

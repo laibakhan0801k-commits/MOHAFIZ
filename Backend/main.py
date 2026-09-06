@@ -11,7 +11,7 @@ import os
 import json
 import math
 import numpy as np
-import groq
+from google.genai import errors as genai_errors
 from dotenv import load_dotenv
 
 from database import SessionLocal, User, Scenario, SavedPlan
@@ -19,12 +19,14 @@ import flood_engine
 import road_flooding
 import routing
 import prevention_validation
+import prevention_coverage
 import ai_hazard_analyst
 import ai_proposer
 import response_validation
 import ai_response_hazard_reader
 import ai_response_strategist
 import ai_response_evaluator
+import ai_plan_summary
 
 load_dotenv()
 SECRET_KEY = os.getenv("SECRET_KEY")
@@ -672,7 +674,27 @@ def _run_prevention_sim(cause_type, params, actions, elevation, bounds, direct_w
 
     after_mask, after_flood = flood_engine.compute_flood_extent_on_array(after_calc, wl_after)
     after_roads = road_flooding.get_flooded_roads_on_array(wl_after, after_calc, bounds)
-    after_buildings = flood_engine.count_affected_buildings_on_array(after_calc, bounds, wl_after)
+
+    # Buildings are judged on a DIFFERENT array from area/roads, and the
+    # difference matters. exclude_engineered_footprint pushes every
+    # engineered cell far above any water level -- correct for area and
+    # roads, because a pond holding water by design is the measure
+    # working, not flood damage. Applied to BUILDINGS it silently turns
+    # "we excavated a 3m pond under this house" into "this house is no
+    # longer flooded": a real 5-pond plan reported 9 -> 5 buildings
+    # saved, and every one of the four had its ground lowered 3m and sat
+    # inside a pond footprint -- one of them under 6.8m of water.
+    #
+    # So for the building count, restore real ground inside engineered
+    # footprints. A wall that genuinely raises terrain still counts; a
+    # hole dug underneath no longer does.
+    after_for_buildings = after_calc
+    if engineered_mask.any():
+        after_for_buildings = after_calc.copy()
+        after_for_buildings[engineered_mask] = (
+            elevation[engineered_mask] + protection[engineered_mask]
+        )
+    after_buildings = flood_engine.count_affected_buildings_on_array(after_for_buildings, bounds, wl_after)
     after_depth = flood_engine.compute_depth_stats_on_array(after_calc, wl_after)
 
     before_img = flood_engine.render_flood_png_base64(before_mask)
@@ -713,6 +735,15 @@ def _run_prevention_sim(cause_type, params, actions, elevation, bounds, direct_w
         "locally_protected_m3": round(local_protection_m3, 0),
         "pixels_saved": pixels_saved,
         "area_saved_m2": round(pixels_saved * flood_engine.PIXEL_AREA_M2, 0),
+        # Flood reduction WHERE THE MEASURES ACT. The basin-wide
+        # flooded_percent above is honest but is averaged over the whole
+        # ~50km2 study area, almost none of which any measure touches --
+        # so it reports 3.51% -> 3.49% and reads as "this plan does
+        # nothing". Same two masks, restricted to the ground the plan
+        # actually raised. See prevention_coverage.local_flood_reduction.
+        "local_flood_reduction": prevention_coverage.local_flood_reduction(
+            before_mask, after_mask, protection
+        ),
     })
 
     return before_stats, after_stats, before_img, after_img, capacity_meta, terrain_meta, structural_vol_m3
@@ -756,6 +787,20 @@ def prevention_simulate(request: PreventionSimulateRequest):
             "flood_image_bounds": [w, s, e, n],
             "capacity": capacity,
             "terrain_meta": terrain,
+            # Protection coverage -- the metric that actually moves for a
+            # prevention plan. The flood-extent numbers above are honest
+            # and will barely change (a pond holds thousands of m3; the
+            # catchment holds millions), so on their own they read as
+            # "this plan does nothing". This says how many of the
+            # buildings and cut roads the flood really exposes now sit
+            # inside a real measure's real service reach. Same shape of
+            # answer the AI RESPONSE plan already gives.
+            # See prevention_coverage.py.
+            "coverage": prevention_coverage.compute_coverage(
+                [a.dict() if hasattr(a, "dict") else a for a in request.actions],
+                elevation, bounds, before["water_level_m"],
+                cause_type=request.cause_type,
+            ),
         }
     except HTTPException:
         raise
@@ -911,38 +956,57 @@ class AISuggestRequest(BaseModel):
 # return whatever proposals already succeeded rather than failing the
 # whole request -- partial real results beat a failed one, especially
 # live. See ai_proposer.run_prevention_proposer's `deadline` param.
-AI_SUGGEST_TIME_BUDGET_S = 35
+#
+# Raised from 35 after switching to Gemini's free tier: ai_llm.py now
+# genuinely sleeps between calls to stay under the 5-requests/minute
+# limit, so a real run's wall-clock time went up even though the number
+# of API calls it makes did not. 35s wasn't enough room for that pacing
+# to ever pay off -- the deadline would cut the request off mid-wait
+# before a paced-out call could even happen.
+#
+# Raised again from 100 after a real live run: the deadline is only
+# checked before STARTING a new attempt, not enforced on one already in
+# flight, so a real call already running when the deadline is checked
+# can still take up to its own http timeout (ai_llm.py's timeout_s=45)
+# to actually return. A real run that genuinely needed 2+ rejected
+# attempts on one action type before moving to the next took 175s wall-
+# clock time -- comfortably past the old 100s budget -- and never got
+# to try a second action type or zone as a result. 100s was enough to
+# make ONE real attempt at ONE action type; it was never enough to let
+# the "try the next action type when this one is rejected" design
+# actually do its job.
+AI_SUGGEST_TIME_BUDGET_S = int(os.environ.get("AI_SUGGEST_TIME_BUDGET_S") or 300)
 
 
 def _ai_http_error(ex):
     """Turn an AI-pipeline exception into an HTTPException the UI can
     actually act on.
 
-    A Groq quota/rate-limit rejection is not an internal server error
+    A Gemini quota/rate-limit rejection is not an internal server error
     and not "this simulation has no hazards" -- both of which is how it
     used to surface (the hazard analyst swallowed it and returned zero
-    zones with a 200). It gets its own 429 and the model's real
-    retry-after text, so the user knows to wait rather than assuming the
-    feature is broken. Anything else keeps the previous 500 + trailing
-    traceback, which is genuinely useful for a real code fault.
+    zones with a 200). It gets its own 429, so the user knows to wait
+    rather than assuming the feature is broken. Anything else keeps the
+    previous 500 + trailing traceback, which is genuinely useful for a
+    real code fault.
     """
     import traceback
 
-    if isinstance(ex, groq.RateLimitError):
-        detail = (
-            "Groq API quota reached, so the AI agents could not run. "
-            "This is an account limit, not a problem with your scenario. "
-            "Groq reported: " + str(getattr(ex, "message", None) or ex)
-        )
-        return HTTPException(status_code=429, detail=detail)
+    if isinstance(ex, genai_errors.APIError):
+        if ex.code == 429:
+            detail = (
+                "Gemini API quota reached, so the AI agents could not run. "
+                "This is an account limit, not a problem with your scenario. "
+                "Gemini reported: " + str(getattr(ex, "message", None) or ex)
+            )
+            return HTTPException(status_code=429, detail=detail)
 
-    if isinstance(ex, groq.AuthenticationError):
-        return HTTPException(
-            status_code=502,
-            detail="Groq rejected the API key (check GROQ_API_KEY in Backend/.env). Groq reported: " + str(ex),
-        )
+        if ex.code in (401, 403):
+            return HTTPException(
+                status_code=502,
+                detail="Gemini rejected the API key (check GEMINI_API_KEY in Backend/.env). Gemini reported: " + str(ex),
+            )
 
-    if isinstance(ex, groq.APIError):
         return HTTPException(
             status_code=502,
             detail="The AI provider call failed: " + type(ex).__name__ + ": " + str(ex),
@@ -1013,18 +1077,34 @@ def ai_prevention_suggest(request: AISuggestRequest):
 
 class AIResponseCompareRequest(BaseModel):
     water_level_m: float
+    # Only river_overflow is supported (response_validation.py only ports
+    # that scenario's rules so far -- see its own module docstring, and
+    # ai_response_strategist.py's RIVER_OVERFLOW_ACTION_ORDER, which has
+    # no other scenario's action list to fall back on). Defaults to
+    # river_overflow for old frontend builds that don't send this field
+    # at all -- this endpoint previously silently forced that value
+    # regardless of what was sent, so a default here changes nothing for
+    # them; it only lets a NEW caller that sends a real cause_type get
+    # rejected honestly instead of silently validated against the wrong
+    # scenario's physics.
+    cause_type: str = "river_overflow"
+    # Rainfall gates every action on the real PMD 24-hour band rather
+    # than a modelled depth (response_validation_rainfall.RULES), so the
+    # band has to travel with the request.
+    rainfall_band: Optional[str] = None
     # The user's real, currently-placed Response Plan actions -- same
     # loose per-item shape as AISuggestRequest.existing_plan_actions,
     # plus params/parameters (for evacuationZone/warningPoint's real
     # coverage radius) and road_u/road_v (for closeRoad, so the Impact
-    # Evaluator can match it against the real flooded-edge list). Only
-    # river_overflow is supported (response_validation.py only ports
-    # that scenario's rules so far -- see its own module docstring).
+    # Evaluator can match it against the real flooded-edge list).
     existing_response_actions: list = []
     max_proposals: int = 4
 
 
-AI_RESPONSE_TIME_BUDGET_S = 35
+# See AI_SUGGEST_TIME_BUDGET_S's comment -- raised for the same reasons:
+# room for ai_llm.py's Gemini free-tier pacing, and room for a rejected
+# attempt already in flight to actually finish before the next one starts.
+AI_RESPONSE_TIME_BUDGET_S = int(os.environ.get("AI_RESPONSE_TIME_BUDGET_S") or 300)
 
 
 @app.post("/ai/response/compare")
@@ -1049,8 +1129,31 @@ def ai_response_compare(request: AIResponseCompareRequest):
     LLM guess at what improved.
     """
     import time
+
+    # Previously this silently forced cause_type = "river_overflow"
+    # regardless of what the frontend sent (it never sent anything at
+    # all -- see AIResponseCompareRequest.cause_type's own comment).
+    # That meant a Rainfall/Drainage Failure/Dam Release run got real-
+    # looking proposals that were actually validated against river-
+    # overflow physics -- wrong, but not visibly wrong. Reject it
+    # honestly instead: only river_overflow has real response validation
+    # rules ported (response_validation.py) and a real action list
+    # (ai_response_strategist.RIVER_OVERFLOW_ACTION_ORDER) to check
+    # against, so there is nothing correct this endpoint can do for any
+    # other cause_type yet.
+    if request.cause_type not in ("river_overflow", "rainfall", "drainage_failure", "dam_release"):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "AI Response Plan is only available for River Overflow, Rainfall and Drainage Failure scenarios right now. "
+                "This simulation is " + request.cause_type + ", which doesn't have real response "
+                "validation rules ported yet -- see response_validation.py. Use the manual Response "
+                "Plan tools for this scenario instead."
+            ),
+        )
+
+    cause_type = request.cause_type
     deadline = time.time() + AI_RESPONSE_TIME_BUDGET_S
-    cause_type = "river_overflow"
     try:
         simulation_stats = ai_hazard_analyst.get_current_simulation_stats(request.water_level_m)
         hazard = ai_response_hazard_reader.run_hazard_reader(
@@ -1059,7 +1162,10 @@ def ai_response_compare(request: AIResponseCompareRequest):
         )
 
         roads = prevention_validation.load_roads_geojson()
-        ctx = response_validation.build_context(request.water_level_m, roads, request.existing_response_actions)
+        ctx = response_validation.build_context(
+            request.water_level_m, roads, request.existing_response_actions,
+            cause_type=cause_type, rainfall_band=request.rainfall_band,
+        )
 
         strategist_result = ai_response_strategist.run_response_strategist(
             hazard["uncovered_zones"], cause_type, ctx,
@@ -1071,11 +1177,30 @@ def ai_response_compare(request: AIResponseCompareRequest):
             request.water_level_m, ctx, request.existing_response_actions, proposed_actions,
         )
 
+        # Zone-by-zone breakdown, real plan totals and a transparent
+        # confidence score -- all computed from the real layers and the
+        # real trace (see ai_plan_summary's own module docstring for
+        # what is deliberately NOT computed, and why).
+        plan_summary = ai_plan_summary.build_plan_summary(
+            hazard.get("priority_zones") or [],
+            strategist_result["proposals"],
+            strategist_result["trace"],
+            comparison,
+            ctx,
+        )
+
         return {
             "hazard_summary": hazard,
             "proposals": strategist_result["proposals"],
             "trace": strategist_result["trace"],
             "comparison": comparison,
+            # What each comparison row means for THIS scenario -- the
+            # five row keys are shared across all four, but "roads" is
+            # flood-cut roads, low points, wet junctions or channel
+            # crossings depending on the cause. See
+            # ai_response_evaluator.ROW_LABELS_BY_CAUSE.
+            "row_labels": ai_response_evaluator.row_labels_for(request.cause_type),
+            "plan_summary": plan_summary,
             "simulation_stats": simulation_stats,
         }
     except HTTPException:
