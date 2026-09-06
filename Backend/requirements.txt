@@ -1,0 +1,18 @@
+# Backend runtime dependencies, pinned to the versions this was built and tested on.
+SQLAlchemy==2.0.52
+bcrypt==5.0.0
+email-validator==2.3.0
+fastapi==0.141.1
+google-genai==2.22.0
+networkx==3.6.1
+numpy==2.4.6
+osmnx==2.1.1
+pillow==12.3.0
+psycopg2-binary==2.9.12
+pydantic==2.13.5
+python-dotenv==1.2.3
+python-jose==3.5.0
+rasterio==1.4.4
+requests==2.34.2
+shapely==2.1.2
+uvicorn==0.52.4
