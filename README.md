@@ -92,6 +92,147 @@ because nothing in the data supports one.
 
 ---
 
+## Architecture
+
+```mermaid
+graph TD
+    subgraph Client["Client — Next.js 16 / React 19"]
+        A["PlanWorkspace — MapLibre planning canvas"]
+        B["FloodMap — 3D scenario setup"]
+        C["Impact Report + Comparison panels"]
+    end
+
+    subgraph API["REST API — FastAPI"]
+        D["Auth — JWT + bcrypt"]
+        E["Simulation — /flood, /prevention/simulate"]
+        F["AI — /ai/prevention/suggest, /ai/response/compare"]
+        G["Routing — /route, /diversion-check"]
+    end
+
+    subgraph Physics["Flood Physics — deterministic"]
+        H["flood_engine — DEM, runoff volume, water level"]
+        I["road_flooding — routable road graph"]
+        J["apply_all_terrain_actions — modified DEM"]
+    end
+
+    subgraph Rules["Placement Rules — same for human and AI"]
+        K["prevention_validation"]
+        L["response_validation + _rainfall / _drainage / _dam"]
+    end
+
+    subgraph Agents["AI Planners — Gemini"]
+        M["Hazard Analyst → priority zones"]
+        N["Proposer → prevention actions"]
+        O["Hazard Reader → uncovered zones"]
+        P["Strategist → response actions"]
+        Q["Impact Evaluator → before/after"]
+    end
+
+    subgraph Candidates["Candidate Generation — real geometry only"]
+        R["ai_candidates"]
+        S["ai_response_candidates"]
+    end
+
+    subgraph Impact["Impact Measurement"]
+        T["prevention_coverage — protection + local flood reduction"]
+        U["ai_plan_summary — zone breakdown, confidence"]
+    end
+
+    subgraph Data["Data"]
+        V[("elevation.tif — 26x31m DEM")]
+        W[("buildings / roads / waterways / facilities GeoJSON")]
+        X[("PostgreSQL — users, scenarios, saved plans")]
+    end
+
+    A --> E
+    B --> E
+    A --> F
+    C --> F
+    A --> G
+    A --> D
+    D --> X
+    E --> H
+    E --> J
+    G --> I
+    F --> M
+    F --> O
+    M --> N
+    O --> P
+    P --> Q
+    N --> R
+    P --> S
+    R --> K
+    S --> L
+    N -- validated pick --> J
+    J --> T
+    Q --> U
+    H --> V
+    R --> W
+    S --> W
+    K --> W
+    L --> W
+    E --> X
+```
+
+**How a plan is produced.** The Hazard Analyst reads real simulation stats and names
+priority zones. Candidate generators enumerate real points inside those zones — on the
+channel, offset onto its banks, on road segments, at facilities. Gemini picks **ids** from
+that list. Every pick runs through the *same* validators a human click faces, and the
+impact is a real recomputation on a modified DEM. The model never emits a coordinate or a
+number.
+
+---
+
+## Project structure
+
+```
+MOHAFIZ/
+├─ Backend/                          FastAPI + flood physics + AI planners
+│   ├─ main.py                       14 REST endpoints, simulation orchestration
+│   ├─ database.py                   SQLAlchemy models (users, scenarios, saved plans)
+│   │
+│   ├─ flood_engine.py               DEM, runoff volume → water level, terrain edits
+│   ├─ road_flooding.py              Routable road graph, flood-cut segments
+│   ├─ routing.py                    Evacuation routing, diversion checks
+│   │
+│   ├─ prevention_validation.py      Placement rules for prevention actions
+│   ├─ prevention_constants.py       Real thresholds, per-scenario action weights
+│   ├─ response_validation.py        River-overflow response rules
+│   ├─ response_validation_rainfall.py
+│   ├─ response_validation_drainage.py
+│   ├─ response_validation_dam.py
+│   │
+│   ├─ ai_llm.py                     Gemini client, shared rate limiter, JSON contract
+│   ├─ ai_hazard_analyst.py          Agent 1 — priority zones from real stats
+│   ├─ ai_candidates.py              Real candidate points (prevention)
+│   ├─ ai_proposer.py                Agent 2 — validated prevention proposals
+│   ├─ ai_response_hazard_reader.py  Agent 1 — what your plan leaves uncovered
+│   ├─ ai_response_candidates.py     Real candidate points (response)
+│   ├─ ai_response_strategist.py     Agent 2 — validated response proposals
+│   ├─ ai_response_evaluator.py      Agent 3 — before/after coverage
+│   ├─ ai_plan_summary.py            Zone breakdown, transparent confidence score
+│   ├─ prevention_coverage.py        Protection coverage + local flood reduction
+│   │
+│   ├─ elevation.tif                 234 x 270 DEM @ 26m x 31m
+│   ├─ buildings.geojson             4,925 footprints
+│   ├─ waterways.geojson             215 features, 56.2 km in catchment
+│   ├─ facilities.geojson            Hospitals, schools, shelters, mosques
+│   ├─ water_bodies.geojson  greenery.geojson
+│   └─ requirements.txt
+│
+└─ Frontend/mohafizweb/              Next.js 16 (Turbopack) + React 19
+    └─ src/
+        ├─ app/                      Routes: /, /map, /plan, /my-plans, /login, ...
+        └─ components/
+            ├─ FloodMap.js               3D scenario setup + simulation
+            ├─ PlanWorkspace.js          Planning canvas, tools, validation, reports
+            ├─ PreventionPlanPanel.js    AI prevention proposals
+            ├─ ResponseComparisonPanel.js AI response proposals + before/after
+            └─ ResponseImpactModal.js    Response Impact Report
+```
+
+---
+
 ## Tech stack
 
 **Backend** — Python / FastAPI `0.141`
@@ -125,16 +266,6 @@ PostgreSQL, `python-jose` JWT + `bcrypt`, `google-genai` (Gemini).
   options rather than fifteen neighbours.
 - **Rate-limit aware** — one shared 60 s window across all agents, deadline-aware waiting,
   and partial results returned rather than a failed request.
-
-### A bug worth admitting
-
-An early version reported "9 → 5 buildings saved". Checking each one showed all four sat
-*inside a retention basin footprint* — the ground under them had been lowered 3 m, and the
-engineered-footprint exclusion (correct for area and roads) had quietly turned "we dug a
-pond under this house" into "this house is safe". One was under 6.8 m of water.
-
-It's fixed. It's in the history on purpose: a plausible number that flatters the demo is
-worse than an honest one that doesn't.
 
 ---
 
