@@ -530,7 +530,11 @@ export default function FloodMap() {
 
   function applyFrame(frame, bounds) {
     const map = mapRef.current;
-    if (!map) return;
+    // `map.style` is null once the WebGL context is lost, and every Map
+    // method reads through it -- so a bare `!map` check still lets the
+    // calls below throw. The animation runs across awaits, which is
+    // exactly when that can happen.
+    if (!map || !map.style) return;
     const [west, south, east, north] = bounds;
     const coords = [
       [west, north],
@@ -568,7 +572,7 @@ export default function FloodMap() {
 
   function applyFinalRoads(result) {
     const map = mapRef.current;
-    if (!map) return;
+    if (!map || !map.style) return;
 
     if (map.getLayer('flood-cut-roads-layer')) map.removeLayer('flood-cut-roads-layer');
     if (map.getSource('flood-cut-roads')) map.removeSource('flood-cut-roads');
@@ -875,6 +879,21 @@ export default function FloodMap() {
       </div>
 
       <div style={{ position: 'absolute', top: 10, right: 10, zIndex: 999, display: 'flex', gap: '8px' }}>
+        <button
+          onClick={() => router.push('/')}
+          style={{
+            background: 'rgba(0,0,0,0.8)',
+            color: '#E2E8F0',
+            border: '1px solid #475569',
+            borderRadius: '6px',
+            padding: '8px 14px',
+            fontWeight: 600,
+            fontSize: '13px',
+            cursor: 'pointer',
+          }}
+        >
+          ← Home
+        </button>
         <button
           onClick={viewContextArea}
           style={{

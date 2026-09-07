@@ -5327,12 +5327,26 @@ export default function PlanWorkspace() {
     // 500m in degrees (approximate at 33°N)
     var degPer500m = 0.0045;
 
-    rows.forEach(function (row, i) {
+    // Each row needs TWO maplibre maps, and each map holds its own WebGL
+    // context. A browser allows only about 16 live contexts per page and
+    // silently kills the least-recently-used one to stay under that --
+    // which took out THIS page's main map (its style goes null, and every
+    // later Map call on it throws). An eight-action plan alone asks for 16
+    // mini-maps. So rows are mounted only while they are on screen and
+    // torn down once they scroll away, which keeps the live count to the
+    // couple of rows actually visible no matter how long the plan is.
+    function rowBounds(i) {
+      var row = rows[i];
       var lat = row.lat != null ? row.lat : (lastActionsRef.current[i] && lastActionsRef.current[i].lat);
       var lon = row.lon != null ? row.lon : (lastActionsRef.current[i] && lastActionsRef.current[i].lon);
-      var fitBounds = (lat != null && lon != null)
+      return (lat != null && lon != null)
         ? [[lon - degPer500m, lat - degPer500m], [lon + degPer500m, lat + degPer500m]]
         : [[fb[0], fb[1]], [fb[2], fb[3]]];
+    }
+
+    function mountRow(i) {
+      if (breakdownMapRefs.current[i] || breakdownAfterMapRefs.current[i]) return;
+      var fitBounds = rowBounds(i);
 
       var beforeContainer = breakdownMapContainers.current[i];
       if (beforeContainer) {
@@ -5342,8 +5356,6 @@ export default function PlanWorkspace() {
           mb.addLayer({ id: 'flood-bd-b-layer', type: 'raster', source: 'flood-bd-b', paint: { 'raster-opacity': 0.78 } });
         });
         breakdownMapRefs.current[i] = mb;
-      } else {
-        breakdownMapRefs.current[i] = null;
       }
 
       var afterContainer = breakdownAfterMapContainers.current[i];
@@ -5354,18 +5366,48 @@ export default function PlanWorkspace() {
           ma.addLayer({ id: 'flood-bd-a-layer', type: 'raster', source: 'flood-bd-a', paint: { 'raster-opacity': 0.78 } });
         });
         breakdownAfterMapRefs.current[i] = ma;
-      } else {
-        breakdownAfterMapRefs.current[i] = null;
       }
+    }
+
+    function unmountRow(i) {
+      if (breakdownMapRefs.current[i]) { breakdownMapRefs.current[i].remove(); breakdownMapRefs.current[i] = null; }
+      if (breakdownAfterMapRefs.current[i]) { breakdownAfterMapRefs.current[i].remove(); breakdownAfterMapRefs.current[i] = null; }
+    }
+
+    var indexByElement = new Map();
+    rows.forEach(function (row, i) {
+      var el = breakdownMapContainers.current[i];
+      if (el) indexByElement.set(el, i);
     });
 
+    // No IntersectionObserver (older browser, jsdom): fall back to mounting
+    // every row, which is the previous behaviour -- a full breakdown beats
+    // an empty one, and the context guard above keeps a loss from throwing.
+    if (typeof IntersectionObserver === 'undefined') {
+      rows.forEach(function (row, i) { mountRow(i); });
+      return function () { rows.forEach(function (row, i) { unmountRow(i); }); };
+    }
+
+    // rootMargin mounts a row just before it scrolls in, so the map has
+    // started loading by the time it is actually looked at.
+    var io = new IntersectionObserver(function (entries) {
+      entries.forEach(function (entry) {
+        var i = indexByElement.get(entry.target);
+        if (i === undefined) return;
+        if (entry.isIntersecting) mountRow(i);
+        else unmountRow(i);
+      });
+    }, { rootMargin: '300px' });
+
+    indexByElement.forEach(function (i, el) { io.observe(el); });
+
     return function () {
-      breakdownMapRefs.current.forEach(function (m) { if (m) m.remove(); });
+      io.disconnect();
+      rows.forEach(function (row, i) { unmountRow(i); });
       breakdownMapRefs.current = [];
-      breakdownAfterMapRefs.current.forEach(function (m) { if (m) m.remove(); });
       breakdownAfterMapRefs.current = [];
     };
-  }, [showBreakdown, breakdownResult]);
+  }, [showBreakdown, breakdownResult, preventionResult]);
 
   var causeType = scenario && scenario.cause_type;
   const TOOLS = planType === 'response'
@@ -6540,7 +6582,11 @@ export default function PlanWorkspace() {
         el.style.textAlign = 'center';
         el.style.pointerEvents = 'none';
         el.style.textShadow = '0 1px 4px rgba(0,0,0,0.5)';
-        el.style.position = 'relative';
+        // Never set position here: .maplibregl-marker is position:absolute /
+        // top:0 / left:0, and maplibre translates from that origin. An inline
+        // position:relative drops the marker into the canvas container's
+        // normal flow, so every icon lands offset from its real lng/lat. The
+        // absolute badge below still anchors correctly to the marker.
         el.textContent = m.emoji;
 
         // Same-type markers dropped on top of each other are fanned out
@@ -6623,7 +6669,6 @@ export default function PlanWorkspace() {
         el.style.textAlign = 'center';
         el.style.pointerEvents = 'none';
         el.style.textShadow = '0 1px 4px rgba(0,0,0,0.5)';
-        el.style.position = 'relative';
         el.textContent = '🚧';
 
         const badge = document.createElement('span');
@@ -8101,13 +8146,26 @@ export default function PlanWorkspace() {
     setAddedProposalKeys(function (prev) { var next = Object.assign({}, prev); next[proposalKey] = true; return next; });
   }
 
+  // A maplibre map that lost its WebGL context keeps its object identity
+  // but nulls its style, and every Map method reads through that style
+  // (Map.getLayer is `return this.style.getLayer(id)`). So a plain
+  // `if (map)` check passes and the call still throws "Cannot read
+  // properties of null". The context genuinely does get dropped here: a
+  // browser allows only ~16 live WebGL contexts per page and the impact
+  // breakdown mounts two mini-maps per action, so a plan with more than
+  // about seven actions costs this map its context.
+  function liveMap() {
+    var m = mapRef.current;
+    return m && m.style ? m : null;
+  }
+
   // HUD map-frame controls -- every one drives a real maplibre method or
   // browser API, never a no-op placeholder.
-  function hudZoomIn() { if (mapRef.current) mapRef.current.zoomIn(); }
-  function hudZoomOut() { if (mapRef.current) mapRef.current.zoomOut(); }
-  function hudResetBearing() { if (mapRef.current) mapRef.current.easeTo({ bearing: 0, pitch: 0, duration: 400 }); }
+  function hudZoomIn() { var m = liveMap(); if (m) m.zoomIn(); }
+  function hudZoomOut() { var m = liveMap(); if (m) m.zoomOut(); }
+  function hudResetBearing() { var m = liveMap(); if (m) m.easeTo({ bearing: 0, pitch: 0, duration: 400 }); }
   function hudToggleFloodLayer() {
-    var map = mapRef.current;
+    var map = liveMap();
     if (!map || !map.getLayer('flood-overlay-layer')) return;
     var next = !floodLayerVisible;
     map.setLayoutProperty('flood-overlay-layer', 'visibility', next ? 'visible' : 'none');
@@ -8121,8 +8179,9 @@ export default function PlanWorkspace() {
     }
     navigator.geolocation.getCurrentPosition(
       function (pos) {
-        if (mapRef.current) {
-          mapRef.current.flyTo({ center: [pos.coords.longitude, pos.coords.latitude], zoom: 15, duration: 900 });
+        var m = liveMap();
+        if (m) {
+          m.flyTo({ center: [pos.coords.longitude, pos.coords.latitude], zoom: 15, duration: 900 });
         }
       },
       function () {
@@ -8256,6 +8315,21 @@ export default function PlanWorkspace() {
           }}
         >
           ← Map
+        </button>
+
+        <button
+          onClick={function () { router.push('/'); }}
+          style={{
+            background: 'transparent',
+            border: '1px solid #3E5C56',
+            color: '#F2F8F5',
+            borderRadius: 8,
+            padding: '6px 12px',
+            cursor: 'pointer',
+            fontSize: 13,
+          }}
+        >
+          🏠 Home
         </button>
 
         <div style={{ display: 'flex', gap: 4, background: '#0A3D37', padding: 4, borderRadius: 10 }}>
@@ -9618,120 +9692,6 @@ export default function PlanWorkspace() {
               </div>
             </div>
 
-            {/* Protection coverage -- the metric a prevention plan actually
-                moves, and the one this report used to be missing. The flood
-                extent numbers above are real and will barely budge (a pond
-                holds thousands of m3 against a catchment holding millions),
-                which is why the report kept reading as "this plan does
-                nothing". Every number here comes from the backend's
-                prevention_coverage.compute_coverage -- real exposed
-                buildings, real cut road segments, real per-action service
-                reaches. Nothing is computed in this component. */}
-            {preventionResult.coverage && preventionResult.coverage.at_risk_buildings > 0 && (function () {
-              var cov = preventionResult.coverage;
-              var rows = [
-                {
-                  label: 'Flood-exposed buildings protected',
-                  after: cov.protected_percent_after,
-                  detail: cov.protected_after + ' of ' + cov.at_risk_buildings +
-                          ' buildings now inside a measure’s service reach',
-                },
-                {
-                  label: 'Flood-cut road segments covered',
-                  after: cov.cut_roads_percent_after,
-                  detail: cov.cut_roads_covered + ' of ' + cov.cut_roads_total +
-                          ' cut segments now have a measure within reach',
-                },
-              ];
-              return (
-                <div style={{
-                  background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: 12,
-                  padding: 14, marginBottom: 10,
-                }}>
-                  <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: 0.4,
-                                textTransform: 'uppercase', color: '#047857', marginBottom: 10 }}>
-                    Protection coverage &mdash; before vs after
-                  </div>
-                  {rows.map(function (r) {
-                    return (
-                      <div key={r.label} style={{ marginBottom: 12 }}>
-                        <div style={{ display: 'flex', justifyContent: 'space-between',
-                                      alignItems: 'baseline', gap: 8, marginBottom: 5 }}>
-                          <span style={{ fontSize: 12, fontWeight: 700, color: '#065f46' }}>{r.label}</span>
-                          <span style={{ fontSize: 12, color: '#64748b' }}>
-                            <b style={{ color: '#94a3b8' }}>0%</b>
-                            <span style={{ margin: '0 5px' }}>&rarr;</span>
-                            <b style={{ fontSize: 16, color: '#059669' }}>{r.after}%</b>
-                          </span>
-                        </div>
-                        <div style={{ height: 8, borderRadius: 999, background: '#dcfce7', overflow: 'hidden' }}>
-                          <div style={{ height: '100%', width: Math.min(100, r.after) + '%',
-                                        background: '#059669', borderRadius: 999 }} />
-                        </div>
-                        <div style={{ fontSize: 11, color: '#64748b', marginTop: 4 }}>{r.detail}</div>
-                      </div>
-                    );
-                  })}
-                  {/* Flood actually removed, stated at BOTH scales so
-                      neither one misleads. Basin-wide is the honest
-                      headline and barely moves; the local figure is the
-                      same two flood masks restricted to the ground the
-                      plan actually raised, which is where a pond or a
-                      widened reach can do anything at all. Both come
-                      from the backend (prevention_coverage.
-                      local_flood_reduction) -- nothing computed here. */}
-                  {(function () {
-                    var lfr = preventionResult.after && preventionResult.after.local_flood_reduction;
-                    if (!lfr) return null;
-                    return (
-                      <div style={{ borderTop: '1px solid #bbf7d0', paddingTop: 10, marginBottom: 10 }}>
-                        <div style={{ fontSize: 11, fontWeight: 700, color: '#065f46', marginBottom: 6 }}>
-                          Flooding on the ground this plan protects
-                        </div>
-                        {/* The reduction IS the headline -- "flooding cut
-                            by 18%" is the sentence, and the two states it
-                            is derived from sit underneath as evidence
-                            rather than competing with it. */}
-                        <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' }}>
-                          <span style={{ fontSize: 34, fontWeight: 900, color: '#059669', lineHeight: 1 }}>
-                            {lfr.reduction_percent}%
-                          </span>
-                          <span style={{ fontSize: 13, fontWeight: 700, color: '#065f46' }}>
-                            of the flooding here is gone
-                          </span>
-                        </div>
-                        <div style={{ fontSize: 11.5, color: '#475569', marginTop: 7 }}>
-                          This ground was{' '}
-                          <b style={{ color: '#dc2626' }}>{lfr.flooded_percent_before}% under water</b>
-                          {' '}before the plan and{' '}
-                          <b style={{ color: '#059669' }}>{lfr.flooded_percent_after}% after</b>
-                          {' '}&mdash; {Number(lfr.drained_m2).toLocaleString()} m² of the
-                          {' '}{Number(lfr.zone_area_m2).toLocaleString()} m² these measures serve is now dry.
-                        </div>
-                        <div style={{ fontSize: 10.5, color: '#64748b', marginTop: 4, opacity: 0.85 }}>
-                          Across the whole study area the change is
-                          {' '}{preventionResult.before.flooded_percent}% &rarr; {preventionResult.after.flooded_percent}%
-                          {' '}&mdash; small because almost none of that area is near a measure, not because the measures failed.
-                        </div>
-                      </div>
-                    );
-                  })()}
-
-                  <div style={{ fontSize: 11, color: '#64748b', borderTop: '1px solid #bbf7d0', paddingTop: 8 }}>
-                    {cov.measures_counted} protective measure{cov.measures_counted === 1 ? '' : 's'} counted
-                    {cov.treated_channel_m > 0 && (
-                      <span> &middot; {Math.round(cov.treated_channel_m).toLocaleString()}m of channel
-                        desilted/cleared ({cov.treated_channel_percent}% of the {Math.round(cov.total_channel_m / 1000)}km network)</span>
-                    )}
-                    <div style={{ marginTop: 4, opacity: 0.85 }}>
-                      &ldquo;Exposed&rdquo; = ground at or below the flood level plus {cov.freeboard_m}m freeboard.
-                      Coverage is 0% before the plan because no measure exists yet &mdash; not a chosen baseline.
-                    </div>
-                  </div>
-                </div>
-              );
-            })()}
-
             {(function () {
               var impact = deriveImpact(preventionResult.before, preventionResult.after);
               var goodColor = '#059669';
@@ -9747,17 +9707,13 @@ export default function PlanWorkspace() {
                     color: '#64748b',
                     marginBottom: 8,
                   }}>
-                    Basin-wide flood extent, roads and buildings are unchanged &mdash; expected at this
+                    Flood extent, roads and buildings are unchanged &mdash; expected at this
                     scale, since no local measure can lower a whole catchment&apos;s flood stage.
-                    The protection coverage above is what this plan actually changes.
                   </div>
                 );
               }
-              var beforeRoads = preventionResult.before.roads_cut || 0;
-              var beforeBuildings = preventionResult.before.buildings_affected || 0;
               var showRoads = impact.roadsSaved > 0;
               var showBuildings = impact.buildingsSaved > 0;
-              var showHoldingTheLine = !showRoads && !showBuildings && (beforeRoads > 0 || beforeBuildings > 0);
 
               return (
                 <div style={{
@@ -9776,13 +9732,33 @@ export default function PlanWorkspace() {
                     </span>
                     <span style={{ color: '#64748b', fontSize: 13, fontWeight: 600 }}>area saved</span>
                   </div>
-                  {impact.floodedPercentChange > 0 && (
-                    <div style={{ textAlign: 'center', fontSize: 10, color: '#94a3b8', marginTop: 3 }}>
-                      {impact.floodedPercentChange}% less flood area
-                    </div>
-                  )}
+                  {/* One supporting line, no more. The local figure is the
+                      meaningful one -- the same two flood masks restricted to
+                      the ground these measures actually raise -- so it is
+                      preferred over the study-area percentage, which is tiny
+                      only because almost none of that area is near a measure. */}
+                  {(function () {
+                    var lfr = preventionResult.after && preventionResult.after.local_flood_reduction;
+                    if (lfr) {
+                      return (
+                        <div style={{ textAlign: 'center', fontSize: 11.5, color: '#475569', marginTop: 7 }}>
+                          <b style={{ color: goodColor }}>{lfr.reduction_percent}%</b> of the flooding on the ground
+                          these measures protect is gone
+                          {' '}({lfr.flooded_percent_before}% &rarr; {lfr.flooded_percent_after}% under water)
+                        </div>
+                      );
+                    }
+                    if (impact.floodedPercentChange > 0) {
+                      return (
+                        <div style={{ textAlign: 'center', fontSize: 10, color: '#94a3b8', marginTop: 3 }}>
+                          {impact.floodedPercentChange}% less flood area
+                        </div>
+                      );
+                    }
+                    return null;
+                  })()}
 
-                  {(showRoads || showBuildings || showHoldingTheLine) && (
+                  {(showRoads || showBuildings) && (
                     <div style={{
                       display: 'flex',
                       gap: 20,
@@ -9802,12 +9778,6 @@ export default function PlanWorkspace() {
                         <div>
                           <span style={{ color: goodColor, fontWeight: 800 }}>{impact.buildingsSaved}</span>
                           <span style={{ color: '#64748b', marginLeft: 4 }}>buildings protected</span>
-                        </div>
-                      )}
-                      {showHoldingTheLine && (
-                        <div style={{ color: '#64748b', textAlign: 'center' }}>
-                          Protecting <span style={{ fontWeight: 700, color: '#0f172a' }}>{beforeRoads} road{beforeRoads === 1 ? '' : 's'}</span> and{' '}
-                          <span style={{ fontWeight: 700, color: '#0f172a' }}>{beforeBuildings} building{beforeBuildings === 1 ? '' : 's'}</span> from worsening conditions
                         </div>
                       )}
                     </div>
